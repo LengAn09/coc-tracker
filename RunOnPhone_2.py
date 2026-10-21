@@ -1094,12 +1094,16 @@ def execute_clan_poll(clan_tag):
             cur.execute("UPDATE clans SET is_active=0 WHERE clan_tag != ?", (clan_tag,))
 
             cur.execute("""
-                SELECT epoch FROM clan_history 
+                SELECT epoch, timestamp FROM clan_history 
                 WHERE clan_tag = ? ORDER BY id DESC LIMIT 1
             """, (clan_tag,))
             last_entry = cur.fetchone()
 
-            if not last_entry or (current_epoch - last_entry[0]) >= 3600:
+            # Create the perfect top-of-the-hour label (e.g. 06:00:00 PM)
+            current_hour_label = now.strftime("%I:00:00 %p")
+
+            # Only save a new entry if we haven't already saved one for this exact hour
+            if not last_entry or last_entry[1] != current_hour_label:
                 cur.execute("""
                     INSERT INTO clan_history (
                         clan_tag, record_date, month_key, season_donations,
@@ -1109,7 +1113,7 @@ def execute_clan_poll(clan_tag):
                 """, (
                     clan_tag, date_str, month_str, season_donations_total,
                     season_received_total, latest_daily_total, clan_hourly,
-                    member_count, now.strftime("%I:%M:%S %p"), current_epoch
+                    member_count, current_hour_label, current_epoch
                 ))
             conn.commit()
 
