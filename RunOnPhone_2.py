@@ -25,6 +25,8 @@ player_sliding_history = {}
 player_baselines = {}        
 current_day = datetime.date.today()
 
+# Memory store for instant live updates on the leaderboard
+live_clan_stats = {} 
 
 def init_db():
     with sqlite3.connect(DB_FILE) as conn:
@@ -59,7 +61,30 @@ def init_db():
         """)
         conn.commit()
 
+def init_live_stats():
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT c.clan_tag, c.clan_name, 
+                   COALESCE(h.season_donations, 0) as season_donations, 
+                   COALESCE(h.latest_daily, 0) as latest_daily
+            FROM clans c
+            LEFT JOIN clan_history h ON c.clan_tag = h.clan_tag
+            WHERE h.id = (
+                SELECT MAX(id) FROM clan_history 
+                WHERE clan_tag = c.clan_tag
+            ) OR h.id IS NULL
+        """)
+        for row in cur.fetchall():
+            live_clan_stats[row["clan_tag"]] = {
+                "name": row["clan_name"] or "Unknown Clan",
+                "season_donations": row["season_donations"],
+                "latest_daily": row["latest_daily"]
+            }
+
 init_db()
+init_live_stats()
 
 def clean_old_records():
     cutoff = int(time.time()) - (62 * 86400)
@@ -178,39 +203,6 @@ HTML_PAGE = """
       min-width: 80px;
     }
 
-    /* Saved Clans Bar */
-    .saved-clans-bar {
-      display: flex;
-      gap: 6px;
-      overflow-x: auto;
-      padding-bottom: 2px;
-    }
-    .clan-pill {
-      background: #101726;
-      border: 1px solid var(--card-border);
-      border-radius: 16px;
-      padding: 4px 10px;
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--text-muted);
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      cursor: pointer;
-      white-space: nowrap;
-    }
-    .clan-pill.active {
-      border-color: var(--neon-cyan);
-      color: var(--neon-cyan);
-      background: rgba(0, 224, 250, 0.08);
-    }
-    .clan-pill .del-btn {
-      color: #ef4444;
-      font-weight: 800;
-      font-size: 10px;
-      padding-left: 2px;
-    }
-
     /* Leaderboard Styles */
     .leaderboard-header {
       font-size: 14px;
@@ -235,14 +227,15 @@ HTML_PAGE = """
       align-items: center;
       gap: 12px;
       cursor: pointer;
+      position: relative;
       transition: transform 0.1s ease, border-color 0.2s ease;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
     }
-    .lb-item:hover {
-      border-color: var(--neon-cyan);
-    }
-    .lb-item:active {
-      transform: scale(0.98);
-    }
+    .lb-item:hover { border-color: var(--neon-cyan); }
+    .lb-item:active { transform: scale(0.98); }
+    
     .lb-rank {
       width: 30px;
       height: 30px;
@@ -259,20 +252,37 @@ HTML_PAGE = """
     .lb-rank.rank-1 { background: linear-gradient(135deg, #ffb81e, #f59e0b); color: #000; box-shadow: 0 0 10px rgba(255, 184, 30, 0.4); }
     .lb-rank.rank-2 { background: linear-gradient(135deg, #cbd5e1, #94a3b8); color: #000; }
     .lb-rank.rank-3 { background: linear-gradient(135deg, #f97316, #ea580c); color: #000; }
-    .lb-details {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-    }
+    .lb-details { flex: 1; display: flex; flex-direction: column; }
     .lb-name { font-size: 13px; font-weight: 700; color: var(--text-white); }
     .lb-tag { font-size: 10px; color: var(--text-muted); }
-    .lb-stats {
-      text-align: right;
-      display: flex;
-      flex-direction: column;
-    }
+    .lb-stats { text-align: right; display: flex; flex-direction: column; }
     .lb-total { font-size: 13px; font-weight: 700; color: var(--neon-amber); }
     .lb-daily { font-size: 11px; font-weight: 700; color: var(--neon-emerald); }
+
+    /* Delete Overlay */
+    .del-overlay {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(18, 23, 33, 0.95);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      animation: fadeIn 0.2s ease-in-out;
+    }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .btn-del-confirm {
+      background: #ef4444;
+      color: white;
+      border: none;
+      padding: 8px 24px;
+      border-radius: 6px;
+      font-weight: 800;
+      font-size: 12px;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+    }
 
     /* Input Card */
     .input-card {
@@ -308,9 +318,7 @@ HTML_PAGE = """
       justify-content: center;
       gap: 6px;
     }
-    .btn-apply:active {
-      background-color: #005a8c;
-    }
+    .btn-apply:active { background-color: #005a8c; }
 
     .btn-back-nav {
       height: 38px;
@@ -331,393 +339,72 @@ HTML_PAGE = """
     .btn-back-nav:hover { background-color: #1a2542; }
 
     /* Month Selector Tabs */
-    .month-tabs {
-      display: flex;
-      background: #0d131f;
-      border: 1px solid var(--card-border);
-      border-radius: 8px;
-      padding: 3px;
-      gap: 4px;
-    }
-    .tab-btn {
-      flex: 1;
-      height: 30px;
-      background: transparent;
-      border: none;
-      border-radius: 6px;
-      color: var(--text-muted);
-      font-size: 11px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .tab-btn.active {
-      background: #172233;
-      color: var(--neon-cyan);
-      box-shadow: 0 1px 3px rgba(0,0,0,0.4);
-    }
+    .month-tabs { display: flex; background: #0d131f; border: 1px solid var(--card-border); border-radius: 8px; padding: 3px; gap: 4px; }
+    .tab-btn { flex: 1; height: 30px; background: transparent; border: none; border-radius: 6px; color: var(--text-muted); font-size: 11px; font-weight: 700; cursor: pointer; transition: all 0.2s; }
+    .tab-btn.active { background: #172233; color: var(--neon-cyan); box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
 
-    /* Reset Timer Card */
-    .reset-card {
-      background-color: #0a121e;
-      border: 1px solid rgba(0, 224, 250, 0.35);
-      border-radius: 10px;
-      padding: 10px 14px;
-      gap: 4px;
-    }
-    .reset-header {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-    .icon-badge {
-      width: 28px;
-      height: 28px;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 14px;
-      font-weight: 700;
-      flex-shrink: 0;
-    }
-    .badge-amber {
-      background: rgba(255, 184, 30, 0.15);
-      color: var(--neon-amber);
-      border: 1px solid rgba(255, 184, 30, 0.4);
-    }
-    .badge-cyan {
-      background: rgba(0, 224, 250, 0.15);
-      color: var(--neon-cyan);
-      border: 1px solid rgba(0, 224, 250, 0.4);
-    }
-    .badge-emerald {
-      background: rgba(16, 217, 133, 0.15);
-      color: var(--neon-emerald);
-      border: 1px solid rgba(16, 217, 133, 0.4);
-    }
-    .badge-purple {
-      background: rgba(167, 115, 250, 0.15);
-      color: var(--neon-purple);
-      border: 1px solid rgba(167, 115, 250, 0.4);
-    }
-    .reset-title {
-      font-size: 11px;
-      font-weight: 700;
-      color: var(--neon-amber);
-      letter-spacing: 0.5px;
-    }
-    .reset-sub {
-      font-size: 9px;
-      color: var(--text-muted);
-    }
-    .timer-tag {
-      font-size: 10px;
-      font-weight: 700;
-      color: var(--text-muted);
-      text-align: center;
-      margin-top: 4px;
-      letter-spacing: 0.5px;
-    }
-    .timer-countdown {
-      font-size: 28px;
-      font-weight: 700;
-      text-align: center;
-      color: var(--text-white);
-      letter-spacing: 1px;
-    }
+    /* Reset Timer Card & Metrics... */
+    .reset-card { background-color: #0a121e; border: 1px solid rgba(0, 224, 250, 0.35); border-radius: 10px; padding: 10px 14px; gap: 4px; }
+    .reset-header { display: flex; align-items: center; gap: 10px; }
+    .icon-badge { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700; flex-shrink: 0; }
+    .badge-amber { background: rgba(255, 184, 30, 0.15); color: var(--neon-amber); border: 1px solid rgba(255, 184, 30, 0.4); }
+    .badge-cyan { background: rgba(0, 224, 250, 0.15); color: var(--neon-cyan); border: 1px solid rgba(0, 224, 250, 0.4); }
+    .badge-emerald { background: rgba(16, 217, 133, 0.15); color: var(--neon-emerald); border: 1px solid rgba(16, 217, 133, 0.4); }
+    .badge-purple { background: rgba(167, 115, 250, 0.15); color: var(--neon-purple); border: 1px solid rgba(167, 115, 250, 0.4); }
+    .reset-title { font-size: 11px; font-weight: 700; color: var(--neon-amber); letter-spacing: 0.5px; }
+    .reset-sub { font-size: 9px; color: var(--text-muted); }
+    .timer-tag { font-size: 10px; font-weight: 700; color: var(--text-muted); text-align: center; margin-top: 4px; letter-spacing: 0.5px; }
+    .timer-countdown { font-size: 28px; font-weight: 700; text-align: center; color: var(--text-white); letter-spacing: 1px; }
 
-    /* 2x2 Telemetry Grid */
-    .metrics-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-    }
-    .metric-card {
-      background: #0d131f;
-      border: 1px solid var(--card-border);
-      border-radius: 10px;
-      padding: 8px 10px;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-    }
-    .metric-top {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .metric-title {
-      font-size: 8.5px;
-      font-weight: 700;
-      color: var(--text-muted);
-      letter-spacing: 0.5px;
-    }
-    .metric-val {
-      font-size: 17px;
-      font-weight: 700;
-    }
+    .metrics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .metric-card { background: #0d131f; border: 1px solid var(--card-border); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+    .metric-top { display: flex; align-items: center; gap: 6px; }
+    .metric-title { font-size: 8.5px; font-weight: 700; color: var(--text-muted); letter-spacing: 0.5px; }
+    .metric-val { font-size: 17px; font-weight: 700; }
 
-    /* Historical Daily Logs Drawer */
-    .history-card {
-      background-color: var(--card-inner-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 10px;
-      padding: 10px;
-      gap: 6px;
-    }
-    .history-title {
-      font-size: 11px;
-      font-weight: 700;
-      color: var(--neon-cyan);
-      display: flex;
-      justify-content: space-between;
-    }
-    .history-list {
-      max-height: 140px;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      margin-top: 4px;
-    }
-    .history-row {
-      display: flex;
-      justify-content: space-between;
-      font-size: 10.5px;
-      padding: 4px 6px;
-      background: #0a0e14;
-      border-radius: 4px;
-      color: var(--text-muted);
-    }
-    .history-row .h-val {
-      color: var(--neon-emerald);
-      font-weight: 700;
-    }
-    .history-row .h-rate {
-      color: var(--neon-purple);
-      font-weight: 700;
-    }
+    /* Historical Logs & Member List */
+    .history-card { background-color: var(--card-inner-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 10px; gap: 6px; }
+    .history-title { font-size: 11px; font-weight: 700; color: var(--neon-cyan); display: flex; justify-content: space-between; }
+    .history-list { max-height: 140px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+    .history-row { display: flex; justify-content: space-between; font-size: 10.5px; padding: 4px 6px; background: #0a0e14; border-radius: 4px; color: var(--text-muted); }
+    .history-row .h-val { color: var(--neon-emerald); font-weight: 700; }
+    .history-row .h-rate { color: var(--neon-purple); font-weight: 700; }
 
-    /* Section Header */
-    .section-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 4px 4px 0 4px;
-    }
-    .sec-title {
-      font-size: 10.5px;
-      font-weight: 700;
-      color: var(--neon-cyan);
-      letter-spacing: 0.5px;
-    }
-    .sec-sub {
-      font-size: 10px;
-      color: var(--text-muted);
-    }
+    .section-header { display: flex; justify-content: space-between; align-items: center; padding: 4px 4px 0 4px; }
+    .sec-title { font-size: 10.5px; font-weight: 700; color: var(--neon-cyan); letter-spacing: 0.5px; }
+    .sec-sub { font-size: 10px; color: var(--text-muted); }
 
-    /* Members List */
-    .members-list {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .member-card {
-      background-color: var(--card-inner-bg);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 12px;
-      padding: 10px 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      cursor: pointer;
-      transition: border-color 0.15s ease, transform 0.1s ease;
-    }
-    .member-card:hover {
-      border-color: rgba(0, 224, 250, 0.5);
-    }
-    .member-card:active {
-      transform: scale(0.99);
-    }
+    .members-list { display: flex; flex-direction: column; gap: 8px; }
+    .member-card { background-color: var(--card-inner-bg); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; cursor: pointer; transition: border-color 0.15s ease, transform 0.1s ease; }
+    .member-card:hover { border-color: rgba(0, 224, 250, 0.5); }
+    .member-card:active { transform: scale(0.99); }
 
-    /* Member Top Bar */
-    .member-top-bar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .rank-box {
-      width: 32px;
-      height: 32px;
-      border-radius: 8px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 13px;
-      font-weight: 800;
-      flex-shrink: 0;
-    }
-    .rank-1 { background-color: var(--neon-amber); color: #000; }
-    .rank-2 { background-color: #cbd5e1; color: #000; }
-    .rank-3 { background-color: #f97316; color: #000; }
+    .member-top-bar { display: flex; align-items: center; gap: 8px; }
     .rank-def { background-color: #212b3d; color: var(--text-white); }
+    .exp-badge { padding: 3px 6px; background: rgba(16, 42, 85, 0.8); border: 1px solid rgba(56, 139, 253, 0.7); border-radius: 6px; font-size: 10.5px; font-weight: 700; color: #64b5f6; flex-shrink: 0; }
+    .member-info-col { display: flex; flex-direction: column; overflow: hidden; flex: 1; }
+    .player-name { font-size: 13.5px; font-weight: 700; color: var(--text-white); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .player-tag { font-size: 9.5px; color: var(--text-muted); }
+    .role-badge { padding: 3px 8px; background: rgba(46, 35, 15, 0.8); border: 1px solid rgba(255, 184, 30, 0.6); border-radius: 6px; font-size: 8.5px; font-weight: 700; color: var(--neon-amber); white-space: nowrap; flex-shrink: 0; }
+    .member-stats-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding-top: 4px; border-top: 1px solid rgba(255, 255, 255, 0.05); }
+    .stats-col { display: flex; flex-direction: column; gap: 1px; }
+    .stats-col-title { font-size: 9px; font-weight: 700; color: var(--text-muted); letter-spacing: 0.5px; margin-bottom: 2px; }
+    .stat-line { font-size: 9.5px; display: flex; gap: 3px; align-items: baseline; }
+    .stat-lbl { font-size: 8px; color: var(--text-muted); font-weight: 600; }
 
-    .exp-badge {
-      padding: 3px 6px;
-      background: rgba(16, 42, 85, 0.8);
-      border: 1px solid rgba(56, 139, 253, 0.7);
-      border-radius: 6px;
-      font-size: 10.5px;
-      font-weight: 700;
-      color: #64b5f6;
-      flex-shrink: 0;
-    }
-    .member-info-col {
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      flex: 1;
-    }
-    .player-name {
-      font-size: 13.5px;
-      font-weight: 700;
-      color: var(--text-white);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .player-tag {
-      font-size: 9.5px;
-      color: var(--text-muted);
-    }
-    .role-badge {
-      padding: 3px 8px;
-      background: rgba(46, 35, 15, 0.8);
-      border: 1px solid rgba(255, 184, 30, 0.6);
-      border-radius: 6px;
-      font-size: 8.5px;
-      font-weight: 700;
-      color: var(--neon-amber);
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
+    /* Footer & Modal */
+    .footer-card { min-height: 30px; background-color: #06090e; border-color: #17202e; flex-direction: row; justify-content: space-between; align-items: center; padding: 4px 10px; }
+    .footer-left { font-size: 10px; color: var(--text-muted); }
+    .footer-right { font-size: 10px; font-weight: 700; color: var(--neon-cyan); }
 
-    /* Member Stats Grid */
-    .member-stats-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 6px;
-      padding-top: 4px;
-      border-top: 1px solid rgba(255, 255, 255, 0.05);
-    }
-    .stats-col {
-      display: flex;
-      flex-direction: column;
-      gap: 1px;
-    }
-    .stats-col-title {
-      font-size: 9px;
-      font-weight: 700;
-      color: var(--text-muted);
-      letter-spacing: 0.5px;
-      margin-bottom: 2px;
-    }
-    .stat-line {
-      font-size: 9.5px;
-      display: flex;
-      gap: 3px;
-      align-items: baseline;
-    }
-    .stat-lbl {
-      font-size: 8px;
-      color: var(--text-muted);
-      font-weight: 600;
-    }
-
-    /* Footer */
-    .footer-card {
-      min-height: 30px;
-      background-color: #06090e;
-      border-color: #17202e;
-      flex-direction: row;
-      justify-content: space-between;
-      align-items: center;
-      padding: 4px 10px;
-    }
-    .footer-left {
-      font-size: 10px;
-      color: var(--text-muted);
-    }
-    .footer-right {
-      font-size: 10px;
-      font-weight: 700;
-      color: var(--neon-cyan);
-    }
-
-    /* Modal */
-    .modal-backdrop {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background-color: rgba(0, 0, 0, 0.75);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-      z-index: 1000;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.2s ease;
-    }
-    .modal-backdrop.show {
-      opacity: 1;
-      pointer-events: auto;
-    }
-    .modal-card {
-      width: 100%;
-      max-width: 360px;
-      background: #0f1624;
-      border: 1px solid var(--neon-cyan);
-      border-radius: 12px;
-      padding: 18px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      text-align: center;
-      box-shadow: 0 10px 25px rgba(0,0,0,0.6);
-    }
-    .modal-title {
-      font-size: 18px;
-      font-weight: 700;
-      color: var(--neon-cyan);
-    }
-    .modal-tag {
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-top: -6px;
-    }
-    .modal-body {
-      font-size: 13px;
-      line-height: 1.6;
-      color: var(--text-white);
-      padding: 10px 0;
-    }
-    .btn-dismiss {
-      height: 38px;
-      background-color: #1c283c;
-      color: var(--text-white);
-      border: none;
-      border-radius: 6px;
-      font-weight: 700;
-      font-size: 12px;
-      cursor: pointer;
-    }
-    .btn-dismiss:active {
-      background-color: #263650;
-    }
+    .modal-backdrop { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0, 0, 0, 0.75); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 1000; opacity: 0; pointer-events: none; transition: opacity 0.2s ease; }
+    .modal-backdrop.show { opacity: 1; pointer-events: auto; }
+    .modal-card { width: 100%; max-width: 360px; background: #0f1624; border: 1px solid var(--neon-cyan); border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 10px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.6); }
+    .modal-title { font-size: 18px; font-weight: 700; color: var(--neon-cyan); }
+    .modal-tag { font-size: 11px; color: var(--text-muted); margin-top: -6px; }
+    .modal-body { font-size: 13px; line-height: 1.6; color: var(--text-white); padding: 10px 0; }
+    .btn-dismiss { height: 38px; background-color: #1c283c; color: var(--text-white); border: none; border-radius: 6px; font-weight: 700; font-size: 12px; cursor: pointer; }
+    .btn-dismiss:active { background-color: #263650; }
   </style>
 </head>
 <body>
@@ -739,12 +426,9 @@ HTML_PAGE = """
         <div style="font-size:11px; color:var(--text-muted); text-align:center;">Loading rankings...</div>
       </div>
 
-      <!-- Saved Clan Bar -->
-      <div class="saved-clans-bar" id="savedClansBar"></div>
-
       <!-- Add Clan Card -->
       <div class="card input-card" id="inputCard">
-        <input type="text" id="inputClan" placeholder="Add Clan Tag (e.g. #2Y9...)" autocapitalize="characters" />
+        <input type="text" id="inputClan" placeholder="Add Clan Tag (e.g. #2Y9...)" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" />
         <button class="btn-apply" id="btnApply">
           <span>+</span> Add clan
         </button>
@@ -862,7 +546,6 @@ HTML_PAGE = """
     const subInfo = document.getElementById("subInfo");
     const lblStatus = document.getElementById("lblStatus");
     const inputClan = document.getElementById("inputClan");
-    const savedClansBar = document.getElementById("savedClansBar");
     const lblCountdown = document.getElementById("lblCountdown");
     const lblMemberSummary = document.getElementById("lblMemberSummary");
     const membersList = document.getElementById("membersList");
@@ -888,7 +571,7 @@ HTML_PAGE = """
     // UI Navigation logic
     function showDetailView(c_tag) {
         clanId = c_tag;
-        inputClan.value = clanId;
+        // inputClan.value is no longer being auto-filled here, keeping the textedit clean
         viewLeaderboard.classList.add("hidden");
         viewClanDetail.classList.remove("hidden");
         fetchData();
@@ -926,40 +609,6 @@ HTML_PAGE = """
       lblCountdown.textContent = `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
     }
 
-    async function loadSavedClans() {
-      try {
-        const res = await fetch("/api/clans");
-        const data = await res.json();
-        renderSavedClansBar(data.clans, data.active_clan);
-      } catch (e) {
-        console.error("Failed loading clans", e);
-      }
-    }
-
-    function renderSavedClansBar(clans, active) {
-      savedClansBar.innerHTML = "";
-      if (!clans || clans.length === 0) return;
-
-      clans.forEach(c => {
-        const pill = document.createElement("div");
-        pill.className = `clan-pill`;
-        pill.innerHTML = `
-          <span>${escapeHtml(c.clan_name || c.clan_tag)}</span>
-          <span class="del-btn" title="Delete">✕</span>
-        `;
-        pill.querySelector("span:first-child").onclick = () => {
-          showDetailView(c.clan_tag);
-        };
-        pill.querySelector(".del-btn").onclick = async (ev) => {
-          ev.stopPropagation();
-          await fetch(`/api/clans/delete?tag=${encodeURIComponent(c.clan_tag)}`, { method: "POST" });
-          loadSavedClans();
-          loadLeaderboard();
-        };
-        savedClansBar.appendChild(pill);
-      });
-    }
-
     async function loadHistoricalLogs() {
       if (!clanId) return;
       try {
@@ -988,6 +637,26 @@ HTML_PAGE = """
       }
     }
 
+    function showDeleteOption(element, clanTag) {
+        if (element.querySelector('.del-overlay')) return;
+        
+        const overlay = document.createElement('div');
+        overlay.className = 'del-overlay';
+        overlay.innerHTML = `<button class="btn-del-confirm">DELETE CLAN</button>`;
+        
+        overlay.querySelector('.btn-del-confirm').onclick = async (ev) => {
+            ev.stopPropagation();
+            await fetch(`/api/clans/delete?tag=${encodeURIComponent(clanTag)}`, { method: "POST" });
+            loadLeaderboard();
+        };
+        
+        element.appendChild(overlay);
+        
+        setTimeout(() => {
+            if(overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        }, 4000);
+    }
+
     async function loadLeaderboard() {
       try {
         const res = await fetch("/api/leaderboard");
@@ -1010,8 +679,6 @@ HTML_PAGE = """
           const item = document.createElement("div");
           item.className = "lb-item";
           
-          item.onclick = () => showDetailView(clan.clan_tag);
-
           item.innerHTML = `
             <div class="lb-rank ${rankClass}">${rank}</div>
             <div class="lb-details">
@@ -1023,6 +690,44 @@ HTML_PAGE = """
               <span class="lb-daily">+${Number(clan.latest_daily).toLocaleString()} today</span>
             </div>
           `;
+
+          let pressTimer;
+          let isLongPress = false;
+          
+          const startPress = (e) => {
+              isLongPress = false;
+              pressTimer = setTimeout(() => {
+                  isLongPress = true;
+                  showDeleteOption(item, clan.clan_tag);
+              }, 500); 
+          };
+          
+          const endPress = () => clearTimeout(pressTimer);
+          
+          item.addEventListener('touchstart', startPress, {passive: true});
+          item.addEventListener('touchend', endPress);
+          item.addEventListener('touchcancel', endPress);
+          
+          item.addEventListener('mousedown', startPress);
+          item.addEventListener('mouseup', endPress);
+          item.addEventListener('mouseleave', endPress);
+          
+          item.addEventListener('contextmenu', (e) => {
+              e.preventDefault();
+              isLongPress = true;
+              showDeleteOption(item, clan.clan_tag);
+          });
+          
+          item.onclick = (e) => {
+              if (isLongPress) {
+                  e.preventDefault();
+                  return;
+              }
+              if (e.target.closest('.del-overlay')) return;
+              
+              showDetailView(clan.clan_tag);
+          };
+
           lbList.appendChild(item);
         });
       } catch (e) {
@@ -1061,8 +766,8 @@ HTML_PAGE = """
         remainingTime = INTERVAL_SECONDS;
         lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
 
-        loadSavedClans();
         loadHistoricalLogs();
+        loadLeaderboard(); 
       } catch (err) {
         lblStatus.textContent = "[ ERROR ]";
         lblStatus.style.color = "#ef4444";
@@ -1149,6 +854,7 @@ HTML_PAGE = """
       })[m]);
     }
 
+    // CLAN ADD BUTTON EVENT - Added functionality to clear textbox
     document.getElementById("btnApply").addEventListener("click", () => {
       const clanVal = inputClan.value.trim();
       if (!clanVal) {
@@ -1156,13 +862,16 @@ HTML_PAGE = """
         lblStatus.style.color = "#ef4444";
         return;
       }
+      
+      // Clear the text edit box immediately after clicking add
+      inputClan.value = ""; 
+      
       showDetailView(clanVal);
     });
 
     setInterval(() => {
       updateDailyResetCountdown();
       
-      // If we are currently viewing a clan detail, tick down the polling timer
       if (clanId && !viewClanDetail.classList.contains("hidden")) {
         remainingTime -= 1;
         if (remainingTime <= 0) {
@@ -1172,17 +881,14 @@ HTML_PAGE = """
         lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
       }
       
-      // If on the Leaderboard screen, silently refresh the list every 30 seconds
       if (!clanId || viewClanDetail.classList.contains("hidden")) {
-         if (new Date().getSeconds() % 30 === 0) {
+         if (new Date().getSeconds() % 20 === 0) {
             loadLeaderboard();
          }
       }
     }, 1000);
 
-    // Initial page load functions
     updateDailyResetCountdown();
-    loadSavedClans();
     loadLeaderboard();
   </script>
 </body>
@@ -1190,7 +896,7 @@ HTML_PAGE = """
 """
 
 def execute_clan_poll(clan_tag):
-    global current_day, clan_sliding_history, player_sliding_history, player_baselines
+    global current_day, clan_sliding_history, player_sliding_history, player_baselines, live_clan_stats
 
     with tracking_lock:
         if not clan_tag:
@@ -1280,7 +986,12 @@ def execute_clan_poll(clan_tag):
 
         clan_hourly = max(0, season_donations_total - c_hist[0][1])
 
-        # --- PERSIST TO SQLITE DATABASE ---
+        live_clan_stats[clan_tag] = {
+            "name": clan_name,
+            "season_donations": season_donations_total,
+            "latest_daily": latest_daily_total
+        }
+
         with sqlite3.connect(DB_FILE) as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -1354,23 +1065,14 @@ def index():
 def ping():
     return jsonify({"status": "active", "time": time.time()})
 
-@app.route("/api/clans")
-def get_clans():
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute("SELECT clan_tag, clan_name, is_active FROM clans")
-        rows = [dict(r) for r in cur.fetchall()]
-
-    active_clan = next((r["clan_tag"] for r in rows if r["is_active"] == 1), "")
-    if not active_clan and rows:
-        active_clan = rows[0]["clan_tag"]
-
-    return jsonify({"clans": rows, "active_clan": active_clan})
-
 @app.route("/api/clans/delete", methods=["POST"])
 def delete_clan():
     tag = request.args.get("tag", "").strip()
+    
+    keys_to_delete = [k for k in live_clan_stats if k.lower() == tag.lower()]
+    for k in keys_to_delete:
+        del live_clan_stats[k]
+        
     with sqlite3.connect(DB_FILE) as conn:
         cur = conn.cursor()
         cur.execute("DELETE FROM clans WHERE LOWER(clan_tag) = LOWER(?)", (tag,))
@@ -1406,22 +1108,16 @@ def get_history():
 
 @app.route("/api/leaderboard")
 def get_leaderboard():
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT c.clan_tag, c.clan_name, 
-                   COALESCE(h.season_donations, 0) as season_donations, 
-                   COALESCE(h.latest_daily, 0) as latest_daily
-            FROM clans c
-            LEFT JOIN clan_history h ON c.clan_tag = h.clan_tag
-            WHERE h.id = (
-                SELECT MAX(id) FROM clan_history 
-                WHERE clan_tag = c.clan_tag
-            ) OR h.id IS NULL
-            ORDER BY season_donations DESC
-        """)
-        rows = [dict(r) for r in cur.fetchall()]
+    rows = []
+    for tag, data in live_clan_stats.items():
+        rows.append({
+            "clan_tag": tag,
+            "clan_name": data["name"],
+            "season_donations": data["season_donations"],
+            "latest_daily": data["latest_daily"]
+        })
+        
+    rows.sort(key=lambda x: x["season_donations"], reverse=True)
     return jsonify({"leaderboard": rows})
 
 @app.route("/api/track")
