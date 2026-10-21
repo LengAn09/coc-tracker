@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import socket
+import sqlite3
 import threading
 import time
 import urllib.parse
@@ -16,34 +17,67 @@ API_TOKEN = os.environ.get(
     "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6IjcxMzBkZjBhLTNlYWQtNGQyZi05NThkLTcxMzJkNWNjYTVkYyIsImlhdCI6MTc5MjUwNjkwOSwic3ViIjoiZGV2ZWxvcGVyL2JkMDQ1MjVkLTljMDItNGJmNy1iM2JhLTc1NTI3YWQwNDk5MSIsInNjb3BlcyI6WyJjbGFzaCJdLCJsaW1pdHMiOlt7InRpZXIiOiJkZXZlbG9wZXIvc2lsdmVyIiwidHlwZSI6InRocm90dGxpbmcifSx7ImNpZHJzIjpbIjQ1Ljc5LjIxOC43OSJdLCJ0eXBlIjoiY2xpZW50In1dfQ.E5EMziuzZqcG_maxsWk9CgoobLLSIbwxWedZh8ENy95b0Z1SsbS4Ofw1eY4H6XVtW89zoMEMe-wmyv7dm5yWrw"
 )
 BASE_URL = os.environ.get("COC_BASE_URL", "https://cocproxy.royaleapi.dev/v1")
-DATA_STORE_FILE = os.path.join(os.path.dirname(__file__), "saved_clans.json")
+DB_FILE = os.path.join(os.path.dirname(__file__), "coc_history.db")
 
-# In-memory tracking state
-clan_history = deque()
-player_baselines = {}
-player_hourly_history = {}  # {tag: deque([(timestamp, donated, received)])}
-current_day = datetime.date.today()
-current_tracked_clan = ""
-cached_clan_payload = {}
 tracking_lock = threading.Lock()
+clan_sliding_history = {}    # {clan_tag: deque([(timestamp, total_donations)])}
+player_sliding_history = {}  # {f"{clan_tag}:{player_tag}": deque([(timestamp, donated, received)])}
+player_baselines = {}        # {f"{clan_tag}:{player_tag}": baseline_val}
+current_day = datetime.date.today()
 
 
-def load_persistent_store():
-    if os.path.exists(DATA_STORE_FILE):
-        try:
-            with open(DATA_STORE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"active_clan": "", "saved_clans": []}
+def init_db():
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS clans (
+                clan_tag TEXT PRIMARY KEY,
+                clan_name TEXT,
+                is_active INTEGER DEFAULT 0
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS clan_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                clan_tag TEXT,
+                record_date TEXT,
+                month_key TEXT,
+                season_donations INTEGER,
+                season_received INTEGER,
+                latest_daily INTEGER,
+                hourly_rate INTEGER,
+                member_count INTEGER,
+                timestamp TEXT,
+                epoch INTEGER
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_clan_date ON clan_history(clan_tag, record_date);
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_clan_month ON clan_history(clan_tag, month_key);
+        """)
+        conn.commit()
 
 
-def save_persistent_store(data):
-    try:
-        with open(DATA_STORE_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception:
-        pass
+init_db()
+
+
+def clean_old_records():
+    # Retain records for 62 days (covers current and previous month)
+    cutoff = int(time.time()) - (62 * 86400)
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM clan_history WHERE epoch < ?", (cutoff,))
+        conn.commit()
+
+
+def get_month_keys():
+    now = datetime.datetime.now()
+    this_month = now.strftime("%Y-%m")
+    first_of_this_month = now.replace(day=1)
+    prev_month = (first_of_this_month - datetime.timedelta(days=1)).strftime("%Y-%m")
+    return this_month, prev_month
 
 
 def get_xp_needed_for_next_level(exp_level):
@@ -63,7 +97,7 @@ HTML_PAGE = """
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes" />
-  <title>COCTRACKER // 24/7 TELEMETRY</title>
+  <title>COCTRACKER // 2-MONTH TELEMETRY</title>
   <style>
     :root {
       --bg-canvas: #0a0e14;
@@ -213,6 +247,33 @@ HTML_PAGE = """
       background-color: #005a8c;
     }
 
+    /* Month Selector Tabs */
+    .month-tabs {
+      display: flex;
+      background: #0d131f;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 3px;
+      gap: 4px;
+    }
+    .tab-btn {
+      flex: 1;
+      height: 30px;
+      background: transparent;
+      border: none;
+      border-radius: 6px;
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .tab-btn.active {
+      background: #172233;
+      color: var(--neon-cyan);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+    }
+
     /* Reset Timer Card */
     .reset-card {
       background-color: #0a121e;
@@ -283,7 +344,7 @@ HTML_PAGE = """
       letter-spacing: 1px;
     }
 
-    /* 2x2 Metrics Grid */
+    /* 2x2 Telemetry Grid */
     .metrics-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -311,6 +372,47 @@ HTML_PAGE = """
     }
     .metric-val {
       font-size: 17px;
+      font-weight: 700;
+    }
+
+    /* Historical Daily Logs Drawer */
+    .history-card {
+      background-color: var(--card-inner-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 10px;
+      gap: 6px;
+    }
+    .history-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--neon-cyan);
+      display: flex;
+      justify-content: space-between;
+    }
+    .history-list {
+      max-height: 140px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-top: 4px;
+    }
+    .history-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10.5px;
+      padding: 4px 6px;
+      background: #0a0e14;
+      border-radius: 4px;
+      color: var(--text-muted);
+    }
+    .history-row .h-val {
+      color: var(--neon-emerald);
+      font-weight: 700;
+    }
+    .history-row .h-rate {
+      color: var(--neon-purple);
       font-weight: 700;
     }
 
@@ -540,21 +642,27 @@ HTML_PAGE = """
     <!-- Top Header -->
     <div class="card header-card">
       <div>
-        <div class="clan-title" id="clanTitle">COCTRACKER // 24/7 TELEMETRY</div>
-        <div class="sub-info" id="subInfo">Saved 24/7 Tracker Node Active</div>
+        <div class="clan-title" id="clanTitle">COCTRACKER // MULTI-CLAN</div>
+        <div class="sub-info" id="subInfo">2-Month Telemetry Core Initializing...</div>
       </div>
       <div class="badge-status" id="lblStatus">[ STANDBY ]</div>
     </div>
 
-    <!-- Saved Clan Quick Selection -->
+    <!-- Saved Clan Bar -->
     <div class="saved-clans-bar" id="savedClansBar"></div>
 
     <!-- Add Clan Card -->
     <div class="card input-card" id="inputCard">
-      <input type="text" id="inputClan" placeholder="Clan Tag (e.g. #2Y9...)" autocapitalize="characters" />
+      <input type="text" id="inputClan" placeholder="Add Clan Tag (e.g. #2Y9...)" autocapitalize="characters" />
       <button class="btn-apply" id="btnApply">
         <span>+</span> Add clan
       </button>
+    </div>
+
+    <!-- Month Switcher Tabs (This Month vs Previous Month) -->
+    <div class="month-tabs">
+      <button class="tab-btn active" id="tabCurrentMonth" onclick="selectMonthTab('current')">This Month</button>
+      <button class="tab-btn" id="tabPrevMonth" onclick="selectMonthTab('previous')">Previous Month</button>
     </div>
 
     <!-- Daily Reset Countdown -->
@@ -605,6 +713,17 @@ HTML_PAGE = """
       </div>
     </div>
 
+    <!-- 2-Month Saved Daily & Hourly History Log -->
+    <div class="card history-card" id="historyCard">
+      <div class="history-title">
+        <span>DAILY & HOURLY ARCHIVE</span>
+        <span id="lblArchiveMonth" style="color:var(--text-muted); font-size:9.5px;"></span>
+      </div>
+      <div class="history-list" id="historyList">
+        <div style="font-size:10px; color:var(--text-muted); text-align:center; padding:8px;">No historical logs yet. Records update hourly & daily.</div>
+      </div>
+    </div>
+
     <!-- Members Section Header -->
     <div class="section-header">
       <span class="sec-title">CLAN MEMBERS | DONATION ROSTER</span>
@@ -634,6 +753,7 @@ HTML_PAGE = """
   <script>
     const INTERVAL_SECONDS = 60;
     let clanId = "";
+    let activeMonthTab = "current";
     let remainingTime = INTERVAL_SECONDS;
 
     const clanTitle = document.getElementById("clanTitle");
@@ -644,6 +764,8 @@ HTML_PAGE = """
     const lblCountdown = document.getElementById("lblCountdown");
     const lblMemberSummary = document.getElementById("lblMemberSummary");
     const membersList = document.getElementById("membersList");
+    const historyList = document.getElementById("historyList");
+    const lblArchiveMonth = document.getElementById("lblArchiveMonth");
 
     const valSeasonDon = document.getElementById("valSeasonDon");
     const valSeasonRec = document.getElementById("valSeasonRec");
@@ -660,6 +782,13 @@ HTML_PAGE = """
     const btnDismissModal = document.getElementById("btnDismissModal");
 
     btnDismissModal.onclick = () => playerModal.classList.remove("show");
+
+    function selectMonthTab(tab) {
+      activeMonthTab = tab;
+      document.getElementById("tabCurrentMonth").className = `tab-btn ${tab === 'current' ? 'active' : ''}`;
+      document.getElementById("tabPrevMonth").className = `tab-btn ${tab === 'previous' ? 'active' : ''}`;
+      loadHistoricalLogs();
+    }
 
     function updateDailyResetCountdown() {
       const now = new Date();
@@ -678,14 +807,14 @@ HTML_PAGE = """
       try {
         const res = await fetch("/api/clans");
         const data = await res.json();
-        renderSavedClansBar(data.saved_clans, data.active_clan);
-        if (data.active_clan && !clanId) {
+        renderSavedClansBar(data.clans, data.active_clan);
+        if (data.active_clan && (!clanId || clanId !== data.active_clan)) {
           clanId = data.active_clan;
           inputClan.value = clanId;
           fetchData();
         }
       } catch (e) {
-        console.error("Failed loading saved clans", e);
+        console.error("Failed loading clans", e);
       }
     }
 
@@ -695,23 +824,51 @@ HTML_PAGE = """
 
       clans.forEach(c => {
         const pill = document.createElement("div");
-        pill.className = `clan-pill ${c.tag === active ? "active" : ""}`;
+        pill.className = `clan-pill ${c.clan_tag.toLowerCase() === (clanId || active || "").toLowerCase() ? "active" : ""}`;
         pill.innerHTML = `
-          <span>${escapeHtml(c.name || c.tag)}</span>
+          <span>${escapeHtml(c.clan_name || c.clan_tag)}</span>
           <span class="del-btn" title="Delete">✕</span>
         `;
         pill.querySelector("span:first-child").onclick = () => {
-          clanId = c.tag;
-          inputClan.value = c.tag;
+          clanId = c.clan_tag;
+          inputClan.value = c.clan_tag;
           fetchData();
         };
         pill.querySelector(".del-btn").onclick = async (ev) => {
           ev.stopPropagation();
-          await fetch(`/api/clans/delete?tag=${encodeURIComponent(c.tag)}`, { method: "POST" });
+          await fetch(`/api/clans/delete?tag=${encodeURIComponent(c.clan_tag)}`, { method: "POST" });
           loadSavedClans();
         };
         savedClansBar.appendChild(pill);
       });
+    }
+
+    async function loadHistoricalLogs() {
+      if (!clanId) return;
+      try {
+        const res = await fetch(`/api/history?clan_tag=${encodeURIComponent(clanId)}&period=${activeMonthTab}`);
+        const data = await res.json();
+        lblArchiveMonth.textContent = `Period: ${data.period_label}`;
+        historyList.innerHTML = "";
+
+        if (!data.records || data.records.length === 0) {
+          historyList.innerHTML = `<div style="font-size:10px; color:var(--text-muted); text-align:center; padding:8px;">No records saved for ${data.period_label}.</div>`;
+          return;
+        }
+
+        data.records.forEach(r => {
+          const row = document.createElement("div");
+          row.className = "history-row";
+          row.innerHTML = `
+            <span>${escapeHtml(r.record_date)} <span style="font-size:9px; color:var(--text-faint)">${escapeHtml(r.time)}</span></span>
+            <span>Daily: <span class="h-val">+${Number(r.latest_daily).toLocaleString()}</span></span>
+            <span>Hourly: <span class="h-rate">+${Number(r.hourly_rate).toLocaleString()}/h</span></span>
+          `;
+          historyList.appendChild(row);
+        });
+      } catch (e) {
+        console.error("Failed loading logs", e);
+      }
     }
 
     async function fetchData() {
@@ -744,7 +901,9 @@ HTML_PAGE = """
         lblFooterLeft.textContent = `◷ Updated: ${data.timestamp}`;
         remainingTime = INTERVAL_SECONDS;
         lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
+
         loadSavedClans();
+        loadHistoricalLogs();
       } catch (err) {
         lblStatus.textContent = "[ ERROR ]";
         lblStatus.style.color = "#ef4444";
@@ -863,19 +1022,13 @@ HTML_PAGE = """
 """
 
 def execute_clan_poll(clan_tag):
-    global current_tracked_clan, current_day, clan_history, player_baselines, player_hourly_history, cached_clan_payload
+    global current_day, clan_sliding_history, player_sliding_history, player_baselines
 
     with tracking_lock:
         if not clan_tag:
             return None, "No Clan Tag provided"
 
         clan_tag = clan_tag if clan_tag.startswith("#") else f"#{clan_tag}"
-
-        if clan_tag.lower() != current_tracked_clan.lower():
-            clan_history.clear()
-            player_baselines.clear()
-            player_hourly_history.clear()
-            current_tracked_clan = clan_tag
 
         url = f"{BASE_URL}/clans/{urllib.parse.quote(clan_tag)}"
         headers = {"Authorization": f"Bearer {API_TOKEN}", "Accept": "application/json"}
@@ -891,7 +1044,9 @@ def execute_clan_poll(clan_tag):
 
         now = datetime.datetime.now()
         today = now.date()
-        current_epoch = now.timestamp()
+        current_epoch = int(now.timestamp())
+        date_str = today.strftime("%Y-%m-%d")
+        month_str = today.strftime("%Y-%m")
 
         if today != current_day:
             current_day = today
@@ -906,6 +1061,9 @@ def execute_clan_poll(clan_tag):
         latest_daily_total = 0
         parsed_members = []
 
+        if clan_tag not in clan_sliding_history:
+            clan_sliding_history[clan_tag] = deque()
+
         for member in member_list:
             donations = member.get("donations", 0)
             received = member.get("donationsReceived", 0)
@@ -914,17 +1072,17 @@ def execute_clan_poll(clan_tag):
 
             tag = member.get("tag", "").strip()
             name = member.get("name", "").strip()
+            p_key = f"{clan_tag}:{tag}"
 
-            if tag not in player_baselines or donations < player_baselines[tag]:
-                player_baselines[tag] = donations
+            if p_key not in player_baselines or donations < player_baselines[p_key]:
+                player_baselines[p_key] = donations
 
-            daily = donations - player_baselines[tag]
+            daily = donations - player_baselines[p_key]
             latest_daily_total += daily
 
-            # Hourly tracking per player
-            if tag not in player_hourly_history:
-                player_hourly_history[tag] = deque()
-            p_history = player_hourly_history[tag]
+            if p_key not in player_sliding_history:
+                player_sliding_history[p_key] = deque()
+            p_history = player_sliding_history[p_key]
             p_history.append((current_epoch, donations, received))
             while p_history and (current_epoch - p_history[0][0]) > 3600:
                 p_history.popleft()
@@ -947,11 +1105,45 @@ def execute_clan_poll(clan_tag):
 
         parsed_members.sort(key=lambda m: m["donations"], reverse=True)
 
-        clan_history.append((current_epoch, season_donations_total))
-        while clan_history and (current_epoch - clan_history[0][0]) > 3600:
-            clan_history.popleft()
+        c_hist = clan_sliding_history[clan_tag]
+        c_hist.append((current_epoch, season_donations_total))
+        while c_hist and (current_epoch - c_hist[0][0]) > 3600:
+            c_hist.popleft()
 
-        clan_hourly = max(0, season_donations_total - clan_history[0][1])
+        clan_hourly = max(0, season_donations_total - c_hist[0][1])
+
+        # --- PERSIST TO SQLITE DATABASE (Up to 2 months) ---
+        with sqlite3.connect(DB_FILE) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO clans (clan_tag, clan_name, is_active)
+                VALUES (?, ?, 1)
+                ON CONFLICT(clan_tag) DO UPDATE SET clan_name=excluded.clan_name, is_active=1
+            """, (clan_tag, clan_name))
+
+            # Set other clans inactive
+            cur.execute("UPDATE clans SET is_active=0 WHERE clan_tag != ?", (clan_tag,))
+
+            # Save hourly/daily snapshot (at most 1 entry per 5 mins per clan to keep database clean)
+            cur.execute("""
+                SELECT epoch FROM clan_history 
+                WHERE clan_tag = ? ORDER BY id DESC LIMIT 1
+            """, (clan_tag,))
+            last_entry = cur.fetchone()
+
+            if not last_entry or (current_epoch - last_entry[0]) >= 300:
+                cur.execute("""
+                    INSERT INTO clan_history (
+                        clan_tag, record_date, month_key, season_donations,
+                        season_received, latest_daily, hourly_rate,
+                        member_count, timestamp, epoch
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    clan_tag, date_str, month_str, season_donations_total,
+                    season_received_total, latest_daily_total, clan_hourly,
+                    member_count, now.strftime("%I:%M:%S %p"), current_epoch
+                ))
+            conn.commit()
 
         payload = {
             "clan_name": clan_name,
@@ -965,38 +1157,28 @@ def execute_clan_poll(clan_tag):
             "timestamp": now.strftime("%I:%M:%S %p"),
         }
 
-        cached_clan_payload = payload
-
-        # Keep persistent list updated with clan name
-        store = load_persistent_store()
-        store["active_clan"] = clan_tag
-        found = False
-        for c in store.get("saved_clans", []):
-            if c["tag"].lower() == clan_tag.lower():
-                c["name"] = clan_name
-                found = True
-                break
-        if not found:
-            store.setdefault("saved_clans", []).append({"tag": clan_tag, "name": clan_name})
-        save_persistent_store(store)
-
         return payload, None
 
 
-# --- 24/7 BACKGROUND MONITOR & PING WORKER ---
-def background_telemetry_loop():
+def background_worker_loop():
     while True:
         try:
-            store = load_persistent_store()
-            active_clan = store.get("active_clan")
-            if active_clan:
-                execute_clan_poll(active_clan)
+            with sqlite3.connect(DB_FILE) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT clan_tag FROM clans")
+                clans = cur.fetchall()
 
-            # Keep-alive self-ping for free hosting (Render / PaaS)
+            for (c_tag,) in clans:
+                execute_clan_poll(c_tag)
+                time.sleep(2)  # brief pause between each clan poll
+
+            clean_old_records()
+
+            # Render keep-alive self ping
             self_url = os.environ.get("RENDER_EXTERNAL_URL")
             if self_url:
-                requests.get(f"{self_url}/api/ping", credentials=None, timeout=5)
-        except Exception as e:
+                requests.get(f"{self_url}/api/ping", timeout=5)
+        except Exception:
             pass
         time.sleep(60)
 
@@ -1008,35 +1190,75 @@ def index():
 
 @app.route("/api/ping")
 def ping():
-    return jsonify({"status": "healthy", "timestamp": time.time()})
+    return jsonify({"status": "active", "time": time.time()})
 
 
 @app.route("/api/clans")
 def get_clans():
-    store = load_persistent_store()
-    return jsonify(store)
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT clan_tag, clan_name, is_active FROM clans")
+        rows = [dict(r) for r in cur.fetchall()]
+
+    active_clan = next((r["clan_tag"] for r in rows if r["is_active"] == 1), "")
+    if not active_clan and rows:
+        active_clan = rows[0]["clan_tag"]
+
+    return jsonify({"clans": rows, "active_clan": active_clan})
 
 
 @app.route("/api/clans/delete", methods=["POST"])
 def delete_clan():
     tag = request.args.get("tag", "").strip()
-    store = load_persistent_store()
-    store["saved_clans"] = [c for c in store.get("saved_clans", []) if c["tag"].lower() != tag.lower()]
-    if store.get("active_clan", "").lower() == tag.lower():
-        store["active_clan"] = store["saved_clans"][0]["tag"] if store["saved_clans"] else ""
-    save_persistent_store(store)
-    return jsonify(store)
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM clans WHERE LOWER(clan_tag) = LOWER(?)", (tag,))
+        cur.execute("DELETE FROM clan_history WHERE LOWER(clan_tag) = LOWER(?)", (tag,))
+        conn.commit()
+    return jsonify({"status": "deleted", "tag": tag})
+
+
+@app.route("/api/history")
+def get_history():
+    clan_id = request.args.get("clan_tag", "").strip()
+    period = request.args.get("period", "current")
+
+    clan_tag = clan_id if clan_id.startswith("#") else f"#{clan_id}"
+    this_month, prev_month = get_month_keys()
+
+    target_month = this_month if period == "current" else prev_month
+
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT record_date, timestamp as time, latest_daily, hourly_rate
+            FROM clan_history
+            WHERE LOWER(clan_tag) = LOWER(?) AND month_key = ?
+            ORDER BY id DESC LIMIT 50
+        """, (clan_tag, target_month))
+        rows = [dict(r) for r in cur.fetchall()]
+
+    return jsonify({
+        "period_label": target_month,
+        "records": rows
+    })
 
 
 @app.route("/api/track")
 def track():
     clan_id = request.args.get("clan_tag", "").strip()
     if not clan_id:
-        store = load_persistent_store()
-        clan_id = store.get("active_clan", "")
+        with sqlite3.connect(DB_FILE) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT clan_tag FROM clans WHERE is_active=1 LIMIT 1")
+            row = cur.fetchone()
+            if row:
+                clan_id = row[0]
 
     if not clan_id:
-        return jsonify({"error": "No Clan Tag provided"}), 400
+        return jsonify({"error": "No Clan Tag registered"}), 400
 
     payload, err = execute_clan_poll(clan_id)
     if err:
@@ -1085,8 +1307,8 @@ def get_local_ip():
     return ip
 
 
-# Start 24/7 background worker thread
-threading.Thread(target=background_telemetry_loop, daemon=True).start()
+# Start 24/7 background worker loop for all saved clans
+threading.Thread(target=background_worker_loop, daemon=True).start()
 
 
 if __name__ == "__main__":
@@ -1094,7 +1316,7 @@ if __name__ == "__main__":
     local_ip = get_local_ip()
 
     print("=" * 60)
-    print("  COCTRACKER 24/7 Telemetry Server Starting")
+    print("  COCTRACKER 2-Month Multi-Clan Telemetry Core Starting")
     print("=" * 60)
     print(f"  • Local / Network URL: http://{local_ip}:{port}")
     print(f"  • Active Port:         {port}")
