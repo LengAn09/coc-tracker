@@ -62,6 +62,7 @@ def init_db():
         conn.commit()
 
 def init_live_stats():
+    # Preload the leaderboard state on server startup from the last known snapshot
     with sqlite3.connect(DB_FILE) as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
@@ -229,6 +230,7 @@ HTML_PAGE = """
       cursor: pointer;
       position: relative;
       transition: transform 0.1s ease, border-color 0.2s ease;
+      /* Prevent text selection and default touch actions during long press */
       user-select: none;
       -webkit-user-select: none;
       -webkit-touch-callout: none;
@@ -428,7 +430,7 @@ HTML_PAGE = """
 
       <!-- Add Clan Card -->
       <div class="card input-card" id="inputCard">
-        <input type="text" id="inputClan" placeholder="Add Clan Tag (e.g. #2Y9...)" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" />
+        <input type="text" id="inputClan" placeholder="Add Clan Tag (e.g. #2Y9...)" autocapitalize="characters" />
         <button class="btn-apply" id="btnApply">
           <span>+</span> Add clan
         </button>
@@ -568,25 +570,41 @@ HTML_PAGE = """
 
     btnDismissModal.onclick = () => playerModal.classList.remove("show");
 
+    // Initialize base history state on page load
+    history.replaceState({ page: 'home' }, '', window.location.pathname);
+
     // UI Navigation logic
     function showDetailView(c_tag) {
         clanId = c_tag;
-        // inputClan.value is no longer being auto-filled here, keeping the textedit clean
+        inputClan.value = clanId;
         viewLeaderboard.classList.add("hidden");
         viewClanDetail.classList.remove("hidden");
+        
+        // Push a new state so the device's back button can be caught
+        history.pushState({ page: 'detail' }, '', '#clan=' + encodeURIComponent(c_tag));
+        
         fetchData();
     }
 
+    // Catch hardware/browser Back Button
+    window.addEventListener('popstate', (e) => {
+        // If the state is not 'detail', it means we went back to the 'home' state
+        if (!e.state || e.state.page !== 'detail') {
+            viewClanDetail.classList.add("hidden");
+            viewLeaderboard.classList.remove("hidden");
+            clanId = "";
+            
+            clanTitle.textContent = "COCTRACKER // MULTI-CLAN";
+            subInfo.textContent = "Global Database";
+            subInfo.style.color = "var(--text-muted)";
+            lblStatus.textContent = "[ STANDBY ]";
+            lblStatus.style.color = "var(--text-muted)";
+        }
+    });
+
+    // The UI Back button just triggers the browser's native back function
     document.getElementById("btnBack").onclick = () => {
-        viewClanDetail.classList.add("hidden");
-        viewLeaderboard.classList.remove("hidden");
-        clanId = "";
-        
-        clanTitle.textContent = "COCTRACKER // MULTI-CLAN";
-        subInfo.textContent = "Global Database";
-        subInfo.style.color = "var(--text-muted)";
-        lblStatus.textContent = "[ STANDBY ]";
-        lblStatus.style.color = "var(--text-muted)";
+        history.back(); 
     };
 
     function selectMonthTab(tab) {
@@ -652,6 +670,7 @@ HTML_PAGE = """
         
         element.appendChild(overlay);
         
+        // Auto-remove the delete prompt after 4 seconds if ignored
         setTimeout(() => {
             if(overlay.parentNode) overlay.parentNode.removeChild(overlay);
         }, 4000);
@@ -691,6 +710,7 @@ HTML_PAGE = """
             </div>
           `;
 
+          // --- FIXED LONG PRESS LOGIC ---
           let pressTimer;
           let isLongPress = false;
           
@@ -699,30 +719,37 @@ HTML_PAGE = """
               pressTimer = setTimeout(() => {
                   isLongPress = true;
                   showDeleteOption(item, clan.clan_tag);
-              }, 500); 
+              }, 500); // 500ms hold required
           };
           
-          const endPress = () => clearTimeout(pressTimer);
+          const endPress = () => {
+              clearTimeout(pressTimer);
+          };
           
+          // Touch events (removed touchmove to prevent micro-jitters from cancelling the hold)
           item.addEventListener('touchstart', startPress, {passive: true});
           item.addEventListener('touchend', endPress);
           item.addEventListener('touchcancel', endPress);
           
+          // Mouse events
           item.addEventListener('mousedown', startPress);
           item.addEventListener('mouseup', endPress);
           item.addEventListener('mouseleave', endPress);
           
+          // Prevent default mobile context menu and force our custom delete overlay
           item.addEventListener('contextmenu', (e) => {
               e.preventDefault();
               isLongPress = true;
               showDeleteOption(item, clan.clan_tag);
           });
           
+          // Click Handler
           item.onclick = (e) => {
               if (isLongPress) {
                   e.preventDefault();
                   return;
               }
+              // If user clicked the delete button inside overlay, don't open detail view
               if (e.target.closest('.del-overlay')) return;
               
               showDetailView(clan.clan_tag);
@@ -767,7 +794,7 @@ HTML_PAGE = """
         lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
 
         loadHistoricalLogs();
-        loadLeaderboard(); 
+        loadLeaderboard(); // Keep leaderboard data in sync
       } catch (err) {
         lblStatus.textContent = "[ ERROR ]";
         lblStatus.style.color = "#ef4444";
@@ -854,7 +881,6 @@ HTML_PAGE = """
       })[m]);
     }
 
-    // CLAN ADD BUTTON EVENT - Added functionality to clear textbox
     document.getElementById("btnApply").addEventListener("click", () => {
       const clanVal = inputClan.value.trim();
       if (!clanVal) {
@@ -862,16 +888,13 @@ HTML_PAGE = """
         lblStatus.style.color = "#ef4444";
         return;
       }
-      
-      // Clear the text edit box immediately after clicking add
-      inputClan.value = ""; 
-      
       showDetailView(clanVal);
     });
 
     setInterval(() => {
       updateDailyResetCountdown();
       
+      // If we are currently viewing a clan detail, tick down the polling timer
       if (clanId && !viewClanDetail.classList.contains("hidden")) {
         remainingTime -= 1;
         if (remainingTime <= 0) {
@@ -881,6 +904,7 @@ HTML_PAGE = """
         lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
       }
       
+      // If on the Leaderboard screen, silently refresh the list every 20 seconds
       if (!clanId || viewClanDetail.classList.contains("hidden")) {
          if (new Date().getSeconds() % 20 === 0) {
             loadLeaderboard();
@@ -888,6 +912,7 @@ HTML_PAGE = """
       }
     }, 1000);
 
+    // Initial page load functions
     updateDailyResetCountdown();
     loadLeaderboard();
   </script>
@@ -986,12 +1011,14 @@ def execute_clan_poll(clan_tag):
 
         clan_hourly = max(0, season_donations_total - c_hist[0][1])
 
+        # UPDATE LIVE STATS FOR LEADERBOARD (Instant tracking)
         live_clan_stats[clan_tag] = {
             "name": clan_name,
             "season_donations": season_donations_total,
             "latest_daily": latest_daily_total
         }
 
+        # --- PERSIST TO SQLITE DATABASE ---
         with sqlite3.connect(DB_FILE) as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -1069,6 +1096,7 @@ def ping():
 def delete_clan():
     tag = request.args.get("tag", "").strip()
     
+    # Remove from memory instantly
     keys_to_delete = [k for k in live_clan_stats if k.lower() == tag.lower()]
     for k in keys_to_delete:
         del live_clan_stats[k]
@@ -1108,6 +1136,7 @@ def get_history():
 
 @app.route("/api/leaderboard")
 def get_leaderboard():
+    # Return directly from live memory for perfectly synced data
     rows = []
     for tag, data in live_clan_stats.items():
         rows.append({
