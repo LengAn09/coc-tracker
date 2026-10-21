@@ -20,9 +20,9 @@ BASE_URL = os.environ.get("COC_BASE_URL", "https://cocproxy.royaleapi.dev/v1")
 DB_FILE = os.path.join(os.path.dirname(__file__), "coc_history.db")
 
 tracking_lock = threading.Lock()
-clan_sliding_history = {}    # {clan_tag: deque([(timestamp, total_donations)])}
-player_sliding_history = {}  # {f"{clan_tag}:{player_tag}": deque([(timestamp, donated, received)])}
-player_baselines = {}        # {f"{clan_tag}:{player_tag}": baseline_val}
+clan_sliding_history = {}    
+player_sliding_history = {}  
+player_baselines = {}        
 current_day = datetime.date.today()
 
 
@@ -59,18 +59,14 @@ def init_db():
         """)
         conn.commit()
 
-
 init_db()
 
-
 def clean_old_records():
-    # Retain records for 62 days (covers current and previous month)
     cutoff = int(time.time()) - (62 * 86400)
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM clan_history WHERE epoch < ?", (cutoff,))
         conn.commit()
-
 
 def get_month_keys():
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7)))
@@ -78,7 +74,6 @@ def get_month_keys():
     first_of_this_month = now.replace(day=1)
     prev_month = (first_of_this_month - datetime.timedelta(days=1)).strftime("%Y-%m")
     return this_month, prev_month
-
 
 def get_xp_needed_for_next_level(exp_level):
     if exp_level <= 1:
@@ -89,7 +84,6 @@ def get_xp_needed_for_next_level(exp_level):
         return 10000 + (exp_level - 201) * 500
     else:
         return 60000 + (exp_level - 300) * 1000
-
 
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -134,6 +128,14 @@ HTML_PAGE = """
       flex-direction: column;
       gap: 10px;
       padding-bottom: 24px;
+    }
+    .view-container {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .hidden {
+      display: none !important;
     }
     .card {
       background-color: var(--card-bg);
@@ -209,6 +211,69 @@ HTML_PAGE = """
       padding-left: 2px;
     }
 
+    /* Leaderboard Styles */
+    .leaderboard-header {
+      font-size: 14px;
+      font-weight: 800;
+      color: var(--neon-amber);
+      margin-top: 5px;
+      text-align: center;
+      letter-spacing: 1px;
+    }
+    .lb-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 5px;
+    }
+    .lb-item {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 10px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      transition: transform 0.1s ease, border-color 0.2s ease;
+    }
+    .lb-item:hover {
+      border-color: var(--neon-cyan);
+    }
+    .lb-item:active {
+      transform: scale(0.98);
+    }
+    .lb-rank {
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 14px;
+      flex-shrink: 0;
+      color: #fff;
+      background: #212b3d;
+    }
+    .lb-rank.rank-1 { background: linear-gradient(135deg, #ffb81e, #f59e0b); color: #000; box-shadow: 0 0 10px rgba(255, 184, 30, 0.4); }
+    .lb-rank.rank-2 { background: linear-gradient(135deg, #cbd5e1, #94a3b8); color: #000; }
+    .lb-rank.rank-3 { background: linear-gradient(135deg, #f97316, #ea580c); color: #000; }
+    .lb-details {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+    .lb-name { font-size: 13px; font-weight: 700; color: var(--text-white); }
+    .lb-tag { font-size: 10px; color: var(--text-muted); }
+    .lb-stats {
+      text-align: right;
+      display: flex;
+      flex-direction: column;
+    }
+    .lb-total { font-size: 13px; font-weight: 700; color: var(--neon-amber); }
+    .lb-daily { font-size: 11px; font-weight: 700; color: var(--neon-emerald); }
+
     /* Input Card */
     .input-card {
       gap: 8px;
@@ -246,6 +311,24 @@ HTML_PAGE = """
     .btn-apply:active {
       background-color: #005a8c;
     }
+
+    .btn-back-nav {
+      height: 38px;
+      background-color: #121a2f;
+      border: 1px solid #1c283c;
+      border-radius: 6px;
+      color: var(--neon-cyan);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background-color 0.2s;
+    }
+    .btn-back-nav:hover { background-color: #1a2542; }
 
     /* Month Selector Tabs */
     .month-tabs {
@@ -639,104 +722,119 @@ HTML_PAGE = """
 </head>
 <body>
   <div class="app-window">
-    <!-- Top Header -->
+    <!-- Top Header (Always Visible) -->
     <div class="card header-card">
       <div>
         <div class="clan-title" id="clanTitle">COCTRACKER // MULTI-CLAN</div>
-        <div class="sub-info" id="subInfo">2-Month Telemetry Core Initializing...</div>
+        <div class="sub-info" id="subInfo">Global Database</div>
       </div>
       <div class="badge-status" id="lblStatus">[ STANDBY ]</div>
     </div>
 
-    <!-- Saved Clan Bar -->
-    <div class="saved-clans-bar" id="savedClansBar"></div>
+    <!-- VIEW 1: LEADERBOARD FRONT PAGE -->
+    <div id="viewLeaderboard" class="view-container">
+      <!-- Clan Leaderboard Section -->
+      <div class="leaderboard-header">🏆 GLOBAL CLAN RANKINGS</div>
+      <div class="lb-list" id="leaderboardList">
+        <div style="font-size:11px; color:var(--text-muted); text-align:center;">Loading rankings...</div>
+      </div>
 
-    <!-- Add Clan Card -->
-    <div class="card input-card" id="inputCard">
-      <input type="text" id="inputClan" placeholder="Add Clan Tag (e.g. #2Y9...)" autocapitalize="characters" />
-      <button class="btn-apply" id="btnApply">
-        <span>+</span> Add clan
-      </button>
+      <!-- Saved Clan Bar -->
+      <div class="saved-clans-bar" id="savedClansBar"></div>
+
+      <!-- Add Clan Card -->
+      <div class="card input-card" id="inputCard">
+        <input type="text" id="inputClan" placeholder="Add Clan Tag (e.g. #2Y9...)" autocapitalize="characters" />
+        <button class="btn-apply" id="btnApply">
+          <span>+</span> Add clan
+        </button>
+      </div>
     </div>
 
-    <!-- Month Switcher Tabs (This Month vs Previous Month) -->
-    <div class="month-tabs">
-      <button class="tab-btn active" id="tabCurrentMonth" onclick="selectMonthTab('current')">This Month</button>
-      <button class="tab-btn" id="tabPrevMonth" onclick="selectMonthTab('previous')">Previous Month</button>
-    </div>
+    <!-- VIEW 2: DETAILED CLAN TELEMETRY -->
+    <div id="viewClanDetail" class="view-container hidden">
+      <!-- Back Button -->
+      <button class="btn-back-nav" id="btnBack">← BACK TO RANKINGS</button>
 
-    <!-- Daily Reset Countdown -->
-    <div class="card reset-card">
-      <div class="reset-header">
-        <div class="icon-badge badge-amber">◷</div>
-        <div>
-          <div class="reset-title">DAILY DONATION RESETS</div>
-          <div class="reset-sub">Counters reset every day at 10:30 AM IST</div>
+      <!-- Month Switcher Tabs -->
+      <div class="month-tabs">
+        <button class="tab-btn active" id="tabCurrentMonth" onclick="selectMonthTab('current')">This Month</button>
+        <button class="tab-btn" id="tabPrevMonth" onclick="selectMonthTab('previous')">Previous Month</button>
+      </div>
+
+      <!-- Daily Reset Countdown -->
+      <div class="card reset-card">
+        <div class="reset-header">
+          <div class="icon-badge badge-amber">◷</div>
+          <div>
+            <div class="reset-title">DAILY DONATION RESETS</div>
+            <div class="reset-sub">Counters reset every day at 10:30 AM IST</div>
+          </div>
+        </div>
+        <div class="timer-tag">TIME UNTIL RESET</div>
+        <div class="timer-countdown" id="lblCountdown">00:00:00</div>
+      </div>
+
+      <!-- 2x2 Telemetry Grid -->
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-top">
+            <div class="icon-badge badge-amber" style="width:22px; height:22px; font-size:11px;">🏆</div>
+            <span class="metric-title">SEASON DONATIONS</span>
+          </div>
+          <span class="metric-val" style="color:var(--neon-amber)" id="valSeasonDon">0</span>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-top">
+            <div class="icon-badge badge-cyan" style="width:22px; height:22px; font-size:11px;">↓</div>
+            <span class="metric-title">DONATIONS RECEIVED</span>
+          </div>
+          <span class="metric-val" style="color:var(--neon-cyan)" id="valSeasonRec">0</span>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-top">
+            <div class="icon-badge badge-emerald" style="width:22px; height:22px; font-size:11px;">⚡</div>
+            <span class="metric-title">LATEST DAILY</span>
+          </div>
+          <span class="metric-val" style="color:var(--neon-emerald)" id="valLatestDaily">+0</span>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-top">
+            <div class="icon-badge badge-purple" style="width:22px; height:22px; font-size:11px;">◷</div>
+            <span class="metric-title">CLAN HOURLY DONATION</span>
+          </div>
+          <span class="metric-val" style="color:var(--neon-purple)" id="valClanHourly">0</span>
         </div>
       </div>
-      <div class="timer-tag">TIME UNTIL RESET</div>
-      <div class="timer-countdown" id="lblCountdown">00:00:00</div>
-    </div>
 
-    <!-- 2x2 Telemetry Grid -->
-    <div class="metrics-grid">
-      <div class="metric-card">
-        <div class="metric-top">
-          <div class="icon-badge badge-amber" style="width:22px; height:22px; font-size:11px;">🏆</div>
-          <span class="metric-title">SEASON DONATIONS</span>
+      <!-- 2-Month Saved Daily & Hourly History Log -->
+      <div class="card history-card" id="historyCard">
+        <div class="history-title">
+          <span>DAILY & HOURLY ARCHIVE</span>
+          <span id="lblArchiveMonth" style="color:var(--text-muted); font-size:9.5px;"></span>
         </div>
-        <span class="metric-val" style="color:var(--neon-amber)" id="valSeasonDon">0</span>
-      </div>
-
-      <div class="metric-card">
-        <div class="metric-top">
-          <div class="icon-badge badge-cyan" style="width:22px; height:22px; font-size:11px;">↓</div>
-          <span class="metric-title">DONATIONS RECEIVED</span>
+        <div class="history-list" id="historyList">
+          <div style="font-size:10px; color:var(--text-muted); text-align:center; padding:8px;">No historical logs yet. Records update hourly & daily.</div>
         </div>
-        <span class="metric-val" style="color:var(--neon-cyan)" id="valSeasonRec">0</span>
       </div>
 
-      <div class="metric-card">
-        <div class="metric-top">
-          <div class="icon-badge badge-emerald" style="width:22px; height:22px; font-size:11px;">⚡</div>
-          <span class="metric-title">LATEST DAILY</span>
-        </div>
-        <span class="metric-val" style="color:var(--neon-emerald)" id="valLatestDaily">+0</span>
+      <!-- Members Section Header -->
+      <div class="section-header">
+        <span class="sec-title">CLAN MEMBERS | DONATION ROSTER</span>
+        <span class="sec-sub" id="lblMemberSummary">0/50 Members</span>
       </div>
 
-      <div class="metric-card">
-        <div class="metric-top">
-          <div class="icon-badge badge-purple" style="width:22px; height:22px; font-size:11px;">◷</div>
-          <span class="metric-title">CLAN HOURLY DONATION</span>
-        </div>
-        <span class="metric-val" style="color:var(--neon-purple)" id="valClanHourly">0</span>
+      <!-- Members Scroll Container -->
+      <div class="members-list" id="membersList"></div>
+
+      <!-- Telemetry Footer -->
+      <div class="card footer-card">
+        <span class="footer-left" id="lblFooterLeft">◷ Updated: Standby</span>
+        <span class="footer-right" id="lblFooterRight">Next Poll: 60s</span>
       </div>
-    </div>
-
-    <!-- 2-Month Saved Daily & Hourly History Log -->
-    <div class="card history-card" id="historyCard">
-      <div class="history-title">
-        <span>DAILY & HOURLY ARCHIVE</span>
-        <span id="lblArchiveMonth" style="color:var(--text-muted); font-size:9.5px;"></span>
-      </div>
-      <div class="history-list" id="historyList">
-        <div style="font-size:10px; color:var(--text-muted); text-align:center; padding:8px;">No historical logs yet. Records update hourly & daily.</div>
-      </div>
-    </div>
-
-    <!-- Members Section Header -->
-    <div class="section-header">
-      <span class="sec-title">CLAN MEMBERS | DONATION ROSTER</span>
-      <span class="sec-sub" id="lblMemberSummary">0/50 Members</span>
-    </div>
-
-    <!-- Members Scroll Container -->
-    <div class="members-list" id="membersList"></div>
-
-    <!-- Telemetry Footer -->
-    <div class="card footer-card">
-      <span class="footer-left" id="lblFooterLeft">◷ Updated: Standby</span>
-      <span class="footer-right" id="lblFooterRight">Next Poll: 60s</span>
     </div>
   </div>
 
@@ -755,6 +853,10 @@ HTML_PAGE = """
     let clanId = "";
     let activeMonthTab = "current";
     let remainingTime = INTERVAL_SECONDS;
+
+    // View Containers
+    const viewLeaderboard = document.getElementById("viewLeaderboard");
+    const viewClanDetail = document.getElementById("viewClanDetail");
 
     const clanTitle = document.getElementById("clanTitle");
     const subInfo = document.getElementById("subInfo");
@@ -783,6 +885,27 @@ HTML_PAGE = """
 
     btnDismissModal.onclick = () => playerModal.classList.remove("show");
 
+    // UI Navigation logic
+    function showDetailView(c_tag) {
+        clanId = c_tag;
+        inputClan.value = clanId;
+        viewLeaderboard.classList.add("hidden");
+        viewClanDetail.classList.remove("hidden");
+        fetchData();
+    }
+
+    document.getElementById("btnBack").onclick = () => {
+        viewClanDetail.classList.add("hidden");
+        viewLeaderboard.classList.remove("hidden");
+        clanId = "";
+        
+        clanTitle.textContent = "COCTRACKER // MULTI-CLAN";
+        subInfo.textContent = "Global Database";
+        subInfo.style.color = "var(--text-muted)";
+        lblStatus.textContent = "[ STANDBY ]";
+        lblStatus.style.color = "var(--text-muted)";
+    };
+
     function selectMonthTab(tab) {
       activeMonthTab = tab;
       document.getElementById("tabCurrentMonth").className = `tab-btn ${tab === 'current' ? 'active' : ''}`;
@@ -808,11 +931,6 @@ HTML_PAGE = """
         const res = await fetch("/api/clans");
         const data = await res.json();
         renderSavedClansBar(data.clans, data.active_clan);
-        if (data.active_clan && (!clanId || clanId !== data.active_clan)) {
-          clanId = data.active_clan;
-          inputClan.value = clanId;
-          fetchData();
-        }
       } catch (e) {
         console.error("Failed loading clans", e);
       }
@@ -824,20 +942,19 @@ HTML_PAGE = """
 
       clans.forEach(c => {
         const pill = document.createElement("div");
-        pill.className = `clan-pill ${c.clan_tag.toLowerCase() === (clanId || active || "").toLowerCase() ? "active" : ""}`;
+        pill.className = `clan-pill`;
         pill.innerHTML = `
           <span>${escapeHtml(c.clan_name || c.clan_tag)}</span>
           <span class="del-btn" title="Delete">✕</span>
         `;
         pill.querySelector("span:first-child").onclick = () => {
-          clanId = c.clan_tag;
-          inputClan.value = c.clan_tag;
-          fetchData();
+          showDetailView(c.clan_tag);
         };
         pill.querySelector(".del-btn").onclick = async (ev) => {
           ev.stopPropagation();
           await fetch(`/api/clans/delete?tag=${encodeURIComponent(c.clan_tag)}`, { method: "POST" });
           loadSavedClans();
+          loadLeaderboard();
         };
         savedClansBar.appendChild(pill);
       });
@@ -868,6 +985,48 @@ HTML_PAGE = """
         });
       } catch (e) {
         console.error("Failed loading logs", e);
+      }
+    }
+
+    async function loadLeaderboard() {
+      try {
+        const res = await fetch("/api/leaderboard");
+        const data = await res.json();
+        const lbList = document.getElementById("leaderboardList");
+        lbList.innerHTML = "";
+
+        if (!data.leaderboard || data.leaderboard.length === 0) {
+          lbList.innerHTML = `<div style="font-size:11px; color:var(--text-muted); text-align:center;">No clans tracked yet. Add a clan below.</div>`;
+          return;
+        }
+
+        data.leaderboard.forEach((clan, index) => {
+          const rank = index + 1;
+          let rankClass = "";
+          if (rank === 1) rankClass = "rank-1";
+          else if (rank === 2) rankClass = "rank-2";
+          else if (rank === 3) rankClass = "rank-3";
+
+          const item = document.createElement("div");
+          item.className = "lb-item";
+          
+          item.onclick = () => showDetailView(clan.clan_tag);
+
+          item.innerHTML = `
+            <div class="lb-rank ${rankClass}">${rank}</div>
+            <div class="lb-details">
+              <span class="lb-name">${escapeHtml(clan.clan_name || "Unknown Clan")}</span>
+              <span class="lb-tag">${escapeHtml(clan.clan_tag)}</span>
+            </div>
+            <div class="lb-stats">
+              <span class="lb-total">${Number(clan.season_donations).toLocaleString()}</span>
+              <span class="lb-daily">+${Number(clan.latest_daily).toLocaleString()} today</span>
+            </div>
+          `;
+          lbList.appendChild(item);
+        });
+      } catch (e) {
+        console.error("Failed to load leaderboard", e);
       }
     }
 
@@ -997,14 +1156,14 @@ HTML_PAGE = """
         lblStatus.style.color = "#ef4444";
         return;
       }
-      clanId = clanVal;
-      fetchData();
+      showDetailView(clanVal);
     });
 
     setInterval(() => {
       updateDailyResetCountdown();
-
-      if (clanId) {
+      
+      // If we are currently viewing a clan detail, tick down the polling timer
+      if (clanId && !viewClanDetail.classList.contains("hidden")) {
         remainingTime -= 1;
         if (remainingTime <= 0) {
           remainingTime = INTERVAL_SECONDS;
@@ -1012,10 +1171,19 @@ HTML_PAGE = """
         }
         lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
       }
+      
+      // If on the Leaderboard screen, silently refresh the list every 30 seconds
+      if (!clanId || viewClanDetail.classList.contains("hidden")) {
+         if (new Date().getSeconds() % 30 === 0) {
+            loadLeaderboard();
+         }
+      }
     }, 1000);
 
+    // Initial page load functions
     updateDailyResetCountdown();
     loadSavedClans();
+    loadLeaderboard();
   </script>
 </body>
 </html>
@@ -1112,7 +1280,7 @@ def execute_clan_poll(clan_tag):
 
         clan_hourly = max(0, season_donations_total - c_hist[0][1])
 
-        # --- PERSIST TO SQLITE DATABASE (Up to 2 months) ---
+        # --- PERSIST TO SQLITE DATABASE ---
         with sqlite3.connect(DB_FILE) as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -1121,10 +1289,8 @@ def execute_clan_poll(clan_tag):
                 ON CONFLICT(clan_tag) DO UPDATE SET clan_name=excluded.clan_name, is_active=1
             """, (clan_tag, clan_name))
 
-            # Set other clans inactive
             cur.execute("UPDATE clans SET is_active=0 WHERE clan_tag != ?", (clan_tag,))
 
-            # Save hourly/daily snapshot (at most 1 entry per 5 mins per clan to keep database clean)
             cur.execute("""
                 SELECT epoch FROM clan_history 
                 WHERE clan_tag = ? ORDER BY id DESC LIMIT 1
@@ -1159,7 +1325,6 @@ def execute_clan_poll(clan_tag):
 
         return payload, None
 
-
 def background_worker_loop():
     while True:
         try:
@@ -1170,11 +1335,10 @@ def background_worker_loop():
 
             for (c_tag,) in clans:
                 execute_clan_poll(c_tag)
-                time.sleep(2)  # brief pause between each clan poll
+                time.sleep(2)  
 
             clean_old_records()
 
-            # Render keep-alive self ping
             self_url = os.environ.get("RENDER_EXTERNAL_URL")
             if self_url:
                 requests.get(f"{self_url}/api/ping", timeout=5)
@@ -1182,16 +1346,13 @@ def background_worker_loop():
             pass
         time.sleep(60)
 
-
 @app.route("/")
 def index():
     return render_template_string(HTML_PAGE)
 
-
 @app.route("/api/ping")
 def ping():
     return jsonify({"status": "active", "time": time.time()})
-
 
 @app.route("/api/clans")
 def get_clans():
@@ -1207,7 +1368,6 @@ def get_clans():
 
     return jsonify({"clans": rows, "active_clan": active_clan})
 
-
 @app.route("/api/clans/delete", methods=["POST"])
 def delete_clan():
     tag = request.args.get("tag", "").strip()
@@ -1217,7 +1377,6 @@ def delete_clan():
         cur.execute("DELETE FROM clan_history WHERE LOWER(clan_tag) = LOWER(?)", (tag,))
         conn.commit()
     return jsonify({"status": "deleted", "tag": tag})
-
 
 @app.route("/api/history")
 def get_history():
@@ -1245,6 +1404,25 @@ def get_history():
         "records": rows
     })
 
+@app.route("/api/leaderboard")
+def get_leaderboard():
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT c.clan_tag, c.clan_name, 
+                   COALESCE(h.season_donations, 0) as season_donations, 
+                   COALESCE(h.latest_daily, 0) as latest_daily
+            FROM clans c
+            LEFT JOIN clan_history h ON c.clan_tag = h.clan_tag
+            WHERE h.id = (
+                SELECT MAX(id) FROM clan_history 
+                WHERE clan_tag = c.clan_tag
+            ) OR h.id IS NULL
+            ORDER BY season_donations DESC
+        """)
+        rows = [dict(r) for r in cur.fetchall()]
+    return jsonify({"leaderboard": rows})
 
 @app.route("/api/track")
 def track():
@@ -1265,7 +1443,6 @@ def track():
         return jsonify({"error": err}), 400
 
     return jsonify(payload)
-
 
 @app.route("/api/player")
 def player_details():
@@ -1294,7 +1471,6 @@ def player_details():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -1306,10 +1482,7 @@ def get_local_ip():
         s.close()
     return ip
 
-
-# Start 24/7 background worker loop for all saved clans
 threading.Thread(target=background_worker_loop, daemon=True).start()
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
