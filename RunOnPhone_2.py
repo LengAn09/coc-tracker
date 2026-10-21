@@ -2,6 +2,8 @@ import datetime
 import json
 import os
 import socket
+import threading
+import time
 import urllib.parse
 from collections import deque
 from flask import Flask, jsonify, render_template_string, request
@@ -14,6 +16,7 @@ API_TOKEN = os.environ.get(
     "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6IjcxMzBkZjBhLTNlYWQtNGQyZi05NThkLTcxMzJkNWNjYTVkYyIsImlhdCI6MTc5MjUwNjkwOSwic3ViIjoiZGV2ZWxvcGVyL2JkMDQ1MjVkLTljMDItNGJmNy1iM2JhLTc1NTI3YWQwNDk5MSIsInNjb3BlcyI6WyJjbGFzaCJdLCJsaW1pdHMiOlt7InRpZXIiOiJkZXZlbG9wZXIvc2lsdmVyIiwidHlwZSI6InRocm90dGxpbmcifSx7ImNpZHJzIjpbIjQ1Ljc5LjIxOC43OSJdLCJ0eXBlIjoiY2xpZW50In1dfQ.E5EMziuzZqcG_maxsWk9CgoobLLSIbwxWedZh8ENy95b0Z1SsbS4Ofw1eY4H6XVtW89zoMEMe-wmyv7dm5yWrw"
 )
 BASE_URL = os.environ.get("COC_BASE_URL", "https://cocproxy.royaleapi.dev/v1")
+DATA_STORE_FILE = os.path.join(os.path.dirname(__file__), "saved_clans.json")
 
 # In-memory tracking state
 clan_history = deque()
@@ -21,6 +24,26 @@ player_baselines = {}
 player_hourly_history = {}  # {tag: deque([(timestamp, donated, received)])}
 current_day = datetime.date.today()
 current_tracked_clan = ""
+cached_clan_payload = {}
+tracking_lock = threading.Lock()
+
+
+def load_persistent_store():
+    if os.path.exists(DATA_STORE_FILE):
+        try:
+            with open(DATA_STORE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"active_clan": "", "saved_clans": []}
+
+
+def save_persistent_store(data):
+    try:
+        with open(DATA_STORE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
 
 
 def get_xp_needed_for_next_level(exp_level):
@@ -40,7 +63,7 @@ HTML_PAGE = """
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes" />
-  <title>COCTRACKER // TELEMETRY</title>
+  <title>COCTRACKER // 24/7 TELEMETRY</title>
   <style>
     :root {
       --bg-canvas: #0a0e14;
@@ -119,13 +142,43 @@ HTML_PAGE = """
       min-width: 80px;
     }
 
+    /* Saved Clans Bar */
+    .saved-clans-bar {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 2px;
+    }
+    .clan-pill {
+      background: #101726;
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .clan-pill.active {
+      border-color: var(--neon-cyan);
+      color: var(--neon-cyan);
+      background: rgba(0, 224, 250, 0.08);
+    }
+    .clan-pill .del-btn {
+      color: #ef4444;
+      font-weight: 800;
+      font-size: 10px;
+      padding-left: 2px;
+    }
+
     /* Input Card */
     .input-card {
       gap: 8px;
-      padding: 8px;
-    }
-    .input-card.hidden {
-      display: none;
+      padding: 10px;
     }
     input[type="text"] {
       width: 100%;
@@ -151,6 +204,10 @@ HTML_PAGE = """
       font-weight: 700;
       letter-spacing: 0.5px;
       cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
     }
     .btn-apply:active {
       background-color: #005a8c;
@@ -226,7 +283,7 @@ HTML_PAGE = """
       letter-spacing: 1px;
     }
 
-    /* 2x2 Telemetry Grid */
+    /* 2x2 Metrics Grid */
     .metrics-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -483,16 +540,21 @@ HTML_PAGE = """
     <!-- Top Header -->
     <div class="card header-card">
       <div>
-        <div class="clan-title" id="clanTitle">COCTRACKER // TELEMETRY</div>
-        <div class="sub-info" id="subInfo">Awaiting Clan Initialization...</div>
+        <div class="clan-title" id="clanTitle">COCTRACKER // 24/7 TELEMETRY</div>
+        <div class="sub-info" id="subInfo">Saved 24/7 Tracker Node Active</div>
       </div>
-      <div class="badge-status" id="lblStatus">[ OFFLINE ]</div>
+      <div class="badge-status" id="lblStatus">[ STANDBY ]</div>
     </div>
 
-    <!-- Clan Tag Input Card -->
+    <!-- Saved Clan Quick Selection -->
+    <div class="saved-clans-bar" id="savedClansBar"></div>
+
+    <!-- Add Clan Card -->
     <div class="card input-card" id="inputCard">
       <input type="text" id="inputClan" placeholder="Clan Tag (e.g. #2Y9...)" autocapitalize="characters" />
-      <button class="btn-apply" id="btnApply">CONNECT TELEMETRY FEED</button>
+      <button class="btn-apply" id="btnApply">
+        <span>+</span> Add clan
+      </button>
     </div>
 
     <!-- Daily Reset Countdown -->
@@ -577,8 +639,8 @@ HTML_PAGE = """
     const clanTitle = document.getElementById("clanTitle");
     const subInfo = document.getElementById("subInfo");
     const lblStatus = document.getElementById("lblStatus");
-    const inputCard = document.getElementById("inputCard");
     const inputClan = document.getElementById("inputClan");
+    const savedClansBar = document.getElementById("savedClansBar");
     const lblCountdown = document.getElementById("lblCountdown");
     const lblMemberSummary = document.getElementById("lblMemberSummary");
     const membersList = document.getElementById("membersList");
@@ -591,7 +653,6 @@ HTML_PAGE = """
     const lblFooterLeft = document.getElementById("lblFooterLeft");
     const lblFooterRight = document.getElementById("lblFooterRight");
 
-    // Modal elements
     const playerModal = document.getElementById("playerModal");
     const mPlayerName = document.getElementById("mPlayerName");
     const mPlayerTag = document.getElementById("mPlayerTag");
@@ -599,10 +660,6 @@ HTML_PAGE = """
     const btnDismissModal = document.getElementById("btnDismissModal");
 
     btnDismissModal.onclick = () => playerModal.classList.remove("show");
-
-    if (localStorage.getItem("coc_clan")) {
-      inputClan.value = localStorage.getItem("coc_clan");
-    }
 
     function updateDailyResetCountdown() {
       const now = new Date();
@@ -617,19 +674,62 @@ HTML_PAGE = """
       lblCountdown.textContent = `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
     }
 
-    async function fetchData() {
+    async function loadSavedClans() {
       try {
+        const res = await fetch("/api/clans");
+        const data = await res.json();
+        renderSavedClansBar(data.saved_clans, data.active_clan);
+        if (data.active_clan && !clanId) {
+          clanId = data.active_clan;
+          inputClan.value = clanId;
+          fetchData();
+        }
+      } catch (e) {
+        console.error("Failed loading saved clans", e);
+      }
+    }
+
+    function renderSavedClansBar(clans, active) {
+      savedClansBar.innerHTML = "";
+      if (!clans || clans.length === 0) return;
+
+      clans.forEach(c => {
+        const pill = document.createElement("div");
+        pill.className = `clan-pill ${c.tag === active ? "active" : ""}`;
+        pill.innerHTML = `
+          <span>${escapeHtml(c.name || c.tag)}</span>
+          <span class="del-btn" title="Delete">✕</span>
+        `;
+        pill.querySelector("span:first-child").onclick = () => {
+          clanId = c.tag;
+          inputClan.value = c.tag;
+          fetchData();
+        };
+        pill.querySelector(".del-btn").onclick = async (ev) => {
+          ev.stopPropagation();
+          await fetch(`/api/clans/delete?tag=${encodeURIComponent(c.tag)}`, { method: "POST" });
+          loadSavedClans();
+        };
+        savedClansBar.appendChild(pill);
+      });
+    }
+
+    async function fetchData() {
+      if (!clanId) return;
+      try {
+        lblStatus.textContent = "[ SYNCING ]";
+        lblStatus.style.color = "var(--neon-cyan)";
+
         const res = await fetch(`/api/track?clan_tag=${encodeURIComponent(clanId)}`);
         const data = await res.json();
 
         if (!res.ok) throw new Error(data.error || "Telemetry failed");
 
-        inputCard.classList.add("hidden");
         clanTitle.textContent = data.clan_name.toUpperCase();
-        subInfo.textContent = `TAG: ${data.clan_tag} | FEED ONLINE`;
+        subInfo.textContent = `TAG: ${data.clan_tag} | 24/7 ONLINE`;
         subInfo.style.color = "var(--text-muted)";
 
-        lblStatus.textContent = "● LIVE";
+        lblStatus.textContent = "● 24/7 LIVE";
         lblStatus.style.color = "var(--neon-emerald)";
 
         lblMemberSummary.textContent = `${data.member_count}/50 Members`;
@@ -642,7 +742,9 @@ HTML_PAGE = """
         renderMembers(data.players);
 
         lblFooterLeft.textContent = `◷ Updated: ${data.timestamp}`;
+        remainingTime = INTERVAL_SECONDS;
         lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
+        loadSavedClans();
       } catch (err) {
         lblStatus.textContent = "[ ERROR ]";
         lblStatus.style.color = "#ef4444";
@@ -736,13 +838,7 @@ HTML_PAGE = """
         lblStatus.style.color = "#ef4444";
         return;
       }
-
       clanId = clanVal;
-      localStorage.setItem("coc_clan", clanId);
-
-      lblStatus.textContent = "[ SYNCING ]";
-      lblStatus.style.color = "var(--neon-cyan)";
-      remainingTime = INTERVAL_SECONDS;
       fetchData();
     });
 
@@ -760,118 +856,194 @@ HTML_PAGE = """
     }, 1000);
 
     updateDailyResetCountdown();
+    loadSavedClans();
   </script>
 </body>
 </html>
 """
 
+def execute_clan_poll(clan_tag):
+    global current_tracked_clan, current_day, clan_history, player_baselines, player_hourly_history, cached_clan_payload
+
+    with tracking_lock:
+        if not clan_tag:
+            return None, "No Clan Tag provided"
+
+        clan_tag = clan_tag if clan_tag.startswith("#") else f"#{clan_tag}"
+
+        if clan_tag.lower() != current_tracked_clan.lower():
+            clan_history.clear()
+            player_baselines.clear()
+            player_hourly_history.clear()
+            current_tracked_clan = clan_tag
+
+        url = f"{BASE_URL}/clans/{urllib.parse.quote(clan_tag)}"
+        headers = {"Authorization": f"Bearer {API_TOKEN}", "Accept": "application/json"}
+
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            raw_clan_data = resp.json()
+        except requests.exceptions.HTTPError:
+            return None, f"Supercell HTTP {resp.status_code} (Check IP or Tag)"
+        except Exception as e:
+            return None, str(e)
+
+        now = datetime.datetime.now()
+        today = now.date()
+        current_epoch = now.timestamp()
+
+        if today != current_day:
+            current_day = today
+            player_baselines.clear()
+
+        clan_name = raw_clan_data.get("name", "Unknown Clan")
+        member_count = raw_clan_data.get("members", len(raw_clan_data.get("memberList", [])))
+        member_list = raw_clan_data.get("memberList", [])
+
+        season_donations_total = 0
+        season_received_total = 0
+        latest_daily_total = 0
+        parsed_members = []
+
+        for member in member_list:
+            donations = member.get("donations", 0)
+            received = member.get("donationsReceived", 0)
+            season_donations_total += donations
+            season_received_total += received
+
+            tag = member.get("tag", "").strip()
+            name = member.get("name", "").strip()
+
+            if tag not in player_baselines or donations < player_baselines[tag]:
+                player_baselines[tag] = donations
+
+            daily = donations - player_baselines[tag]
+            latest_daily_total += daily
+
+            # Hourly tracking per player
+            if tag not in player_hourly_history:
+                player_hourly_history[tag] = deque()
+            p_history = player_hourly_history[tag]
+            p_history.append((current_epoch, donations, received))
+            while p_history and (current_epoch - p_history[0][0]) > 3600:
+                p_history.popleft()
+
+            hourly_donated = max(0, donations - p_history[0][1]) if p_history else 0
+            hourly_received = max(0, received - p_history[0][2]) if p_history else 0
+
+            parsed_members.append({
+                "name": name,
+                "tag": tag,
+                "role": member.get("role", "member").upper(),
+                "donations": donations,
+                "donationsReceived": received,
+                "daily": daily,
+                "hourlyDonated": hourly_donated,
+                "hourlyReceived": hourly_received,
+                "expLevel": member.get("expLevel", 0),
+                "trophies": member.get("trophies", 0),
+            })
+
+        parsed_members.sort(key=lambda m: m["donations"], reverse=True)
+
+        clan_history.append((current_epoch, season_donations_total))
+        while clan_history and (current_epoch - clan_history[0][0]) > 3600:
+            clan_history.popleft()
+
+        clan_hourly = max(0, season_donations_total - clan_history[0][1])
+
+        payload = {
+            "clan_name": clan_name,
+            "clan_tag": clan_tag,
+            "member_count": member_count,
+            "players": parsed_members,
+            "season_donations": season_donations_total,
+            "season_received": season_received_total,
+            "latest_daily": latest_daily_total,
+            "clan_hourly": clan_hourly,
+            "timestamp": now.strftime("%I:%M:%S %p"),
+        }
+
+        cached_clan_payload = payload
+
+        # Keep persistent list updated with clan name
+        store = load_persistent_store()
+        store["active_clan"] = clan_tag
+        found = False
+        for c in store.get("saved_clans", []):
+            if c["tag"].lower() == clan_tag.lower():
+                c["name"] = clan_name
+                found = True
+                break
+        if not found:
+            store.setdefault("saved_clans", []).append({"tag": clan_tag, "name": clan_name})
+        save_persistent_store(store)
+
+        return payload, None
+
+
+# --- 24/7 BACKGROUND MONITOR & PING WORKER ---
+def background_telemetry_loop():
+    while True:
+        try:
+            store = load_persistent_store()
+            active_clan = store.get("active_clan")
+            if active_clan:
+                execute_clan_poll(active_clan)
+
+            # Keep-alive self-ping for free hosting (Render / PaaS)
+            self_url = os.environ.get("RENDER_EXTERNAL_URL")
+            if self_url:
+                requests.get(f"{self_url}/api/ping", credentials=None, timeout=5)
+        except Exception as e:
+            pass
+        time.sleep(60)
+
+
 @app.route("/")
 def index():
     return render_template_string(HTML_PAGE)
 
+
+@app.route("/api/ping")
+def ping():
+    return jsonify({"status": "healthy", "timestamp": time.time()})
+
+
+@app.route("/api/clans")
+def get_clans():
+    store = load_persistent_store()
+    return jsonify(store)
+
+
+@app.route("/api/clans/delete", methods=["POST"])
+def delete_clan():
+    tag = request.args.get("tag", "").strip()
+    store = load_persistent_store()
+    store["saved_clans"] = [c for c in store.get("saved_clans", []) if c["tag"].lower() != tag.lower()]
+    if store.get("active_clan", "").lower() == tag.lower():
+        store["active_clan"] = store["saved_clans"][0]["tag"] if store["saved_clans"] else ""
+    save_persistent_store(store)
+    return jsonify(store)
+
+
 @app.route("/api/track")
 def track():
-    global current_tracked_clan, current_day, clan_history, player_baselines, player_hourly_history
-
     clan_id = request.args.get("clan_tag", "").strip()
+    if not clan_id:
+        store = load_persistent_store()
+        clan_id = store.get("active_clan", "")
+
     if not clan_id:
         return jsonify({"error": "No Clan Tag provided"}), 400
 
-    clan_tag = clan_id if clan_id.startswith("#") else f"#{clan_id}"
+    payload, err = execute_clan_poll(clan_id)
+    if err:
+        return jsonify({"error": err}), 400
 
-    if clan_tag.lower() != current_tracked_clan.lower():
-        clan_history.clear()
-        player_baselines.clear()
-        player_hourly_history.clear()
-        current_tracked_clan = clan_tag
+    return jsonify(payload)
 
-    url = f"{BASE_URL}/clans/{urllib.parse.quote(clan_tag)}"
-    headers = {"Authorization": f"Bearer {API_TOKEN}", "Accept": "application/json"}
-
-    try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        raw_clan_data = resp.json()
-    except requests.exceptions.HTTPError:
-        return jsonify({"error": f"Supercell HTTP {resp.status_code} (Check IP or Tag)"}), resp.status_code
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-    now = datetime.datetime.now()
-    today = now.date()
-    current_epoch = now.timestamp()
-
-    if today != current_day:
-        current_day = today
-        player_baselines.clear()
-
-    clan_name = raw_clan_data.get("name", "Unknown Clan")
-    member_count = raw_clan_data.get("members", len(raw_clan_data.get("memberList", [])))
-    member_list = raw_clan_data.get("memberList", [])
-
-    season_donations_total = 0
-    season_received_total = 0
-    latest_daily_total = 0
-    parsed_members = []
-
-    for member in member_list:
-        donations = member.get("donations", 0)
-        received = member.get("donationsReceived", 0)
-        season_donations_total += donations
-        season_received_total += received
-
-        tag = member.get("tag", "").strip()
-        name = member.get("name", "").strip()
-
-        if tag not in player_baselines or donations < player_baselines[tag]:
-            player_baselines[tag] = donations
-
-        daily = donations - player_baselines[tag]
-        latest_daily_total += daily
-
-        # Hourly tracking per player
-        if tag not in player_hourly_history:
-            player_hourly_history[tag] = deque()
-        p_history = player_hourly_history[tag]
-        p_history.append((current_epoch, donations, received))
-        while p_history and (current_epoch - p_history[0][0]) > 3600:
-            p_history.popleft()
-
-        hourly_donated = max(0, donations - p_history[0][1]) if p_history else 0
-        hourly_received = max(0, received - p_history[0][2]) if p_history else 0
-
-        parsed_members.append({
-            "name": name,
-            "tag": tag,
-            "role": member.get("role", "member").upper(),
-            "donations": donations,
-            "donationsReceived": received,
-            "daily": daily,
-            "hourlyDonated": hourly_donated,
-            "hourlyReceived": hourly_received,
-            "expLevel": member.get("expLevel", 0),
-            "trophies": member.get("trophies", 0),
-        })
-
-    parsed_members.sort(key=lambda m: m["donations"], reverse=True)
-
-    clan_history.append((current_epoch, season_donations_total))
-    while clan_history and (current_epoch - clan_history[0][0]) > 3600:
-        clan_history.popleft()
-
-    clan_hourly = max(0, season_donations_total - clan_history[0][1])
-
-    return jsonify({
-        "clan_name": clan_name,
-        "clan_tag": clan_tag,
-        "member_count": member_count,
-        "players": parsed_members,
-        "season_donations": season_donations_total,
-        "season_received": season_received_total,
-        "latest_daily": latest_daily_total,
-        "clan_hourly": clan_hourly,
-        "timestamp": now.strftime("%I:%M:%S %p"),
-    })
 
 @app.route("/api/player")
 def player_details():
@@ -913,12 +1085,16 @@ def get_local_ip():
     return ip
 
 
+# Start 24/7 background worker thread
+threading.Thread(target=background_telemetry_loop, daemon=True).start()
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     local_ip = get_local_ip()
 
     print("=" * 60)
-    print("  COCTRACKER Telemetry Server Starting")
+    print("  COCTRACKER 24/7 Telemetry Server Starting")
     print("=" * 60)
     print(f"  • Local / Network URL: http://{local_ip}:{port}")
     print(f"  • Active Port:         {port}")
