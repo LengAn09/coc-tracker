@@ -73,7 +73,7 @@ def clean_old_records():
 
 
 def get_month_keys():
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7)))
     this_month = now.strftime("%Y-%m")
     first_of_this_month = now.replace(day=1)
     prev_month = (first_of_this_month - datetime.timedelta(days=1)).strftime("%Y-%m")
@@ -1042,7 +1042,7 @@ def execute_clan_poll(clan_tag):
         except Exception as e:
             return None, str(e)
 
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7)))
         today = now.date()
         current_epoch = int(now.timestamp())
         date_str = today.strftime("%Y-%m-%d")
@@ -1131,7 +1131,7 @@ def execute_clan_poll(clan_tag):
             """, (clan_tag,))
             last_entry = cur.fetchone()
 
-            if not last_entry or (current_epoch - last_entry[0]) >= 300:
+            if not last_entry or (current_epoch - last_entry[0]) >= 3600:
                 cur.execute("""
                     INSERT INTO clan_history (
                         clan_tag, record_date, month_key, season_donations,
