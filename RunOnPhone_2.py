@@ -19,12 +19,19 @@ API_TOKEN = os.environ.get(
 )
 BASE_URL = os.environ.get("COC_BASE_URL", "https://cocproxy.royaleapi.dev/v1")
 DATABASE_URL = os.environ.get("DATABASE_URL")
+ADMIN_SECRET = os.environ.get("ADMIN_PASSWORD", "admin123")
 
 tracking_lock = threading.Lock()
 clan_sliding_history = {}    
 player_sliding_history = {}  
 player_baselines = {}        
-current_day = datetime.date.today()
+
+def get_game_day():
+    # CoC "Daily" reset at 5:00 AM UTC (10:30 AM IST)
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    return (now_utc - datetime.timedelta(hours=5)).date()
+
+current_day = get_game_day()
 
 # Memory store for instant live updates on the leaderboard
 live_clan_stats = {} 
@@ -212,6 +219,18 @@ HTML_PAGE = """
       color: var(--text-muted);
       min-width: 80px;
     }
+    .btn-menu {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 20px;
+      font-weight: bold;
+      cursor: pointer;
+      padding: 0 4px;
+      margin-left: 6px;
+      transition: color 0.2s;
+    }
+    .btn-menu:hover { color: var(--neon-cyan); }
 
     /* Leaderboard Styles */
     .leaderboard-header {
@@ -299,7 +318,7 @@ HTML_PAGE = """
       gap: 8px;
       padding: 10px;
     }
-    input[type="text"] {
+    input[type="text"], input[type="password"] {
       width: 100%;
       height: 38px;
       background-color: #0d1421;
@@ -310,7 +329,7 @@ HTML_PAGE = """
       font-size: 13px;
       outline: none;
     }
-    input[type="text"]:focus {
+    input[type="text"]:focus, input[type="password"]:focus {
       border-color: var(--neon-cyan);
     }
     .btn-apply {
@@ -404,7 +423,7 @@ HTML_PAGE = """
     .stat-line { font-size: 9.5px; display: flex; gap: 3px; align-items: baseline; }
     .stat-lbl { font-size: 8px; color: var(--text-muted); font-weight: 600; }
 
-    /* Footer & Modal */
+    /* Footer & Modals */
     .footer-card { min-height: 30px; background-color: #06090e; border-color: #17202e; flex-direction: row; justify-content: space-between; align-items: center; padding: 4px 10px; }
     .footer-left { font-size: 10px; color: var(--text-muted); }
     .footer-right { font-size: 10px; font-weight: 700; color: var(--neon-cyan); }
@@ -427,7 +446,10 @@ HTML_PAGE = """
         <div class="clan-title" id="clanTitle">COCTRACKER // MULTI-CLAN</div>
         <div class="sub-info" id="subInfo">Global Database</div>
       </div>
-      <div class="badge-status" id="lblStatus">[ STANDBY ]</div>
+      <div style="display: flex; align-items: center;">
+        <div class="badge-status" id="lblStatus">[ STANDBY ]</div>
+        <button class="btn-menu" id="btnAdminMenu">⋮</button>
+      </div>
     </div>
 
     <!-- VIEW 1: LEADERBOARD FRONT PAGE -->
@@ -468,6 +490,7 @@ HTML_PAGE = """
       <div class="month-tabs">
         <button class="tab-btn active" id="tabCurrentMonth" onclick="selectMonthTab('current')">This Month</button>
         <button class="tab-btn" id="tabPrevMonth" onclick="selectMonthTab('previous')">Previous Month</button>
+        <button class="tab-btn" id="tab7Day" onclick="selectMonthTab('7day')">Last 7 Days</button>
       </div>
 
       <!-- Daily Reset Countdown -->
@@ -521,7 +544,7 @@ HTML_PAGE = """
       <!-- 2-Month Saved Daily & Hourly History Log -->
       <div class="card history-card" id="historyCard">
         <div class="history-title">
-          <span>DAILY & HOURLY ARCHIVE</span>
+          <span id="lblHistoryTitle">DAILY & HOURLY ARCHIVE</span>
           <span id="lblArchiveMonth" style="color:var(--text-muted); font-size:9.5px;"></span>
         </div>
         <div class="history-list" id="historyList">
@@ -555,12 +578,75 @@ HTML_PAGE = """
       <button class="btn-dismiss" id="btnDismissModal">DISMISS</button>
     </div>
   </div>
+  
+  <!-- Admin Authentication Modal -->
+  <div class="modal-backdrop" id="adminModal">
+    <div class="modal-card">
+      <div class="modal-title" id="adminModalTitle">ADMIN LOGIN</div>
+      <div class="modal-body">
+        <input type="password" id="adminPassword" placeholder="Enter Admin Password" style="margin-bottom:12px;" />
+        <div style="display:flex; gap:8px;">
+          <button class="btn-apply" id="btnLogin" style="flex:1;">LOGIN</button>
+          <button class="btn-back-nav" id="btnLogout" style="flex:1; display:none;">LOGOUT</button>
+          <button class="btn-dismiss" id="btnCloseAdminModal" style="flex:1;">CANCEL</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script>
     const INTERVAL_SECONDS = 60;
     let clanId = "";
     let activeMonthTab = "current";
     let remainingTime = INTERVAL_SECONDS;
+    
+    // --- ADMIN LOGIC ---
+    let adminKey = localStorage.getItem("coctracker_admin_key") || "";
+    let isAdmin = !!adminKey;
+
+    const adminModal = document.getElementById("adminModal");
+    const btnAdminMenu = document.getElementById("btnAdminMenu");
+    const btnCloseAdminModal = document.getElementById("btnCloseAdminModal");
+    const btnLogin = document.getElementById("btnLogin");
+    const btnLogout = document.getElementById("btnLogout");
+    const adminPassword = document.getElementById("adminPassword");
+    const adminModalTitle = document.getElementById("adminModalTitle");
+
+    btnAdminMenu.onclick = () => {
+        if (isAdmin) {
+            adminPassword.style.display = "none";
+            btnLogin.style.display = "none";
+            btnLogout.style.display = "block";
+            adminModalTitle.textContent = "ADMIN ACCESS (LOGGED IN)";
+        } else {
+            adminPassword.style.display = "block";
+            btnLogin.style.display = "block";
+            btnLogout.style.display = "none";
+            adminPassword.value = "";
+            adminModalTitle.textContent = "ADMIN LOGIN";
+        }
+        adminModal.classList.add("show");
+    };
+
+    btnCloseAdminModal.onclick = () => adminModal.classList.remove("show");
+
+    btnLogin.onclick = () => {
+        const pwd = adminPassword.value.trim();
+        if(pwd) {
+            adminKey = pwd;
+            isAdmin = true;
+            localStorage.setItem("coctracker_admin_key", adminKey);
+            adminModal.classList.remove("show");
+        }
+    };
+
+    btnLogout.onclick = () => {
+        adminKey = "";
+        isAdmin = false;
+        localStorage.removeItem("coctracker_admin_key");
+        adminModal.classList.remove("show");
+    };
+    // -------------------
 
     // View Containers
     const viewLeaderboard = document.getElementById("viewLeaderboard");
@@ -583,6 +669,7 @@ HTML_PAGE = """
     const membersList = document.getElementById("membersList");
     const historyList = document.getElementById("historyList");
     const lblArchiveMonth = document.getElementById("lblArchiveMonth");
+    const lblHistoryTitle = document.getElementById("lblHistoryTitle");
 
     const valSeasonDon = document.getElementById("valSeasonDon");
     const valSeasonRec = document.getElementById("valSeasonRec");
@@ -663,6 +750,7 @@ HTML_PAGE = """
       activeMonthTab = tab;
       document.getElementById("tabCurrentMonth").className = `tab-btn ${tab === 'current' ? 'active' : ''}`;
       document.getElementById("tabPrevMonth").className = `tab-btn ${tab === 'previous' ? 'active' : ''}`;
+      document.getElementById("tab7Day").className = `tab-btn ${tab === '7day' ? 'active' : ''}`;
       loadHistoricalLogs();
     }
 
@@ -682,24 +770,41 @@ HTML_PAGE = """
     async function loadHistoricalLogs() {
       if (!clanId) return;
       try {
-        const res = await fetch(`/api/history?clan_tag=${encodeURIComponent(clanId)}&period=${activeMonthTab}`);
+        let url = `/api/history?clan_tag=${encodeURIComponent(clanId)}&period=${activeMonthTab}`;
+        if (activeMonthTab === '7day') {
+            url = `/api/history_7day?clan_tag=${encodeURIComponent(clanId)}`;
+        }
+        
+        const res = await fetch(url);
         const data = await res.json();
-        lblArchiveMonth.textContent = `Period: ${data.period_label}`;
+        
+        lblHistoryTitle.textContent = activeMonthTab === '7day' ? 'DAILY ARCHIVE' : 'DAILY & HOURLY ARCHIVE';
+        lblArchiveMonth.textContent = activeMonthTab === '7day' ? 'Period: Last 7 Days' : `Period: ${data.period_label}`;
         historyList.innerHTML = "";
 
         if (!data.records || data.records.length === 0) {
-          historyList.innerHTML = `<div style="font-size:10px; color:var(--text-muted); text-align:center; padding:8px;">No records saved for ${data.period_label}.</div>`;
+          historyList.innerHTML = `<div style="font-size:10px; color:var(--text-muted); text-align:center; padding:8px;">No records saved.</div>`;
           return;
         }
 
         data.records.forEach(r => {
           const row = document.createElement("div");
           row.className = "history-row";
-          row.innerHTML = `
-            <span>${escapeHtml(r.record_date)} <span style="font-size:9px; color:var(--text-faint)">${escapeHtml(r.time)}</span></span>
-            <span>Daily: <span class="h-val">+${Number(r.latest_daily).toLocaleString()}</span></span>
-            <span>Hourly: <span class="h-rate">+${Number(r.hourly_rate).toLocaleString()}/h</span></span>
-          `;
+          
+          if (activeMonthTab === '7day') {
+              // 7-Day View: Shows only the day and the total 24H daily donations
+              row.innerHTML = `
+                <span style="color:var(--text-white); font-weight:600;">📅 ${escapeHtml(r.record_date)}</span>
+                <span>Total 24H: <span class="h-val" style="font-size:11.5px;">+${Number(r.max_daily).toLocaleString()}</span></span>
+              `;
+          } else {
+              // Current/Previous Month View: Shows timestamp and hourly breakdown
+              row.innerHTML = `
+                <span>${escapeHtml(r.record_date)} <span style="font-size:9px; color:var(--text-faint)">${escapeHtml(r.time)}</span></span>
+                <span>Daily: <span class="h-val">+${Number(r.latest_daily).toLocaleString()}</span></span>
+                <span>Hourly: <span class="h-rate">+${Number(r.hourly_rate).toLocaleString()}/h</span></span>
+              `;
+          }
           historyList.appendChild(row);
         });
       } catch (e) {
@@ -716,8 +821,19 @@ HTML_PAGE = """
         
         overlay.querySelector('.btn-del-confirm').onclick = async (ev) => {
             ev.stopPropagation();
-            await fetch(`/api/clans/delete?tag=${encodeURIComponent(clanTag)}`, { method: "POST" });
-            loadLeaderboard();
+            const res = await fetch(`/api/clans/delete?tag=${encodeURIComponent(clanTag)}`, { 
+                method: "POST",
+                headers: {
+                    "X-Admin-Key": adminKey
+                }
+            });
+            
+            if (res.status === 401) {
+                alert("Unauthorized: Invalid Admin Password.");
+                btnLogout.click(); // force logout if token is bad
+            } else {
+                loadLeaderboard();
+            }
         };
         
         element.appendChild(overlay);
@@ -766,6 +882,7 @@ HTML_PAGE = """
           let isLongPress = false;
           
           const startPress = (e) => {
+              if (!isAdmin) return; // Prevent deleting entirely if not admin
               isLongPress = false;
               pressTimer = setTimeout(() => {
                   isLongPress = true;
@@ -785,6 +902,7 @@ HTML_PAGE = """
           item.addEventListener('mouseleave', endPress);
           
           item.addEventListener('contextmenu', (e) => {
+              if (!isAdmin) return;
               e.preventDefault();
               isLongPress = true;
               showDeleteOption(item, clan.clan_tag);
@@ -1012,13 +1130,13 @@ def execute_clan_poll(clan_tag):
             return None, str(e)
 
         now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7)))
-        today = now.date()
+        game_day = get_game_day()
         current_epoch = int(now.timestamp())
-        date_str = today.strftime("%Y-%m-%d")
-        month_str = today.strftime("%Y-%m")
+        date_str = game_day.strftime("%Y-%m-%d")
+        month_str = game_day.strftime("%Y-%m")
 
-        if today != current_day:
-            current_day = today
+        if game_day != current_day:
+            current_day = game_day
             player_baselines.clear()
 
         clan_name = raw_clan_data.get("name", "Unknown Clan")
@@ -1167,6 +1285,10 @@ def ping():
 
 @app.route("/api/clans/delete", methods=["POST"])
 def delete_clan():
+    admin_key = request.headers.get("X-Admin-Key", "")
+    if admin_key != ADMIN_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+        
     tag = request.args.get("tag", "").strip()
     
     keys_to_delete = [k for k in live_clan_stats if k.lower() == tag.lower()]
@@ -1195,11 +1317,12 @@ def get_history():
     if DATABASE_URL:
         with get_db_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Capped at LIMIT 72 to only show the last 3 days of hourly logs
                 cur.execute("""
                     SELECT record_date, timestamp as time, latest_daily, hourly_rate
                     FROM clan_history
                     WHERE LOWER(clan_tag) = LOWER(%s) AND month_key = %s
-                    ORDER BY id DESC LIMIT 50
+                    ORDER BY id DESC LIMIT 72
                 """, (clan_tag, target_month))
                 rows = [dict(r) for r in cur.fetchall()]
 
@@ -1207,6 +1330,28 @@ def get_history():
         "period_label": target_month,
         "records": rows
     })
+
+@app.route("/api/history_7day")
+def get_7day_history():
+    clan_id = request.args.get("clan_tag", "").strip()
+    clan_tag = clan_id if clan_id.startswith("#") else f"#{clan_id}"
+    
+    rows = []
+    if DATABASE_URL:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Group by day and grab the maximum latest_daily value reached before the reset
+                cur.execute("""
+                    SELECT record_date, MAX(latest_daily) as max_daily
+                    FROM clan_history
+                    WHERE LOWER(clan_tag) = LOWER(%s)
+                    GROUP BY record_date
+                    ORDER BY record_date DESC
+                    LIMIT 7
+                """, (clan_tag,))
+                rows = [dict(r) for r in cur.fetchall()]
+                
+    return jsonify({"records": rows})
 
 @app.route("/api/leaderboard")
 def get_leaderboard():
