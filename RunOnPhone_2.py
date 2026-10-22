@@ -2,13 +2,14 @@ import datetime
 import json
 import os
 import socket
-import sqlite3
 import threading
 import time
 import urllib.parse
 from collections import deque
 from flask import Flask, jsonify, render_template_string, request
 import requests
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 app = Flask(__name__)
 
@@ -17,7 +18,7 @@ API_TOKEN = os.environ.get(
     "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiIsImtpZCI6IjI4YTMxOGY3LTAwMDAtYTFlYi03ZmExLTJjNzQzM2M2Y2NhNSJ9.eyJpc3MiOiJzdXBlcmNlbGwiLCJhdWQiOiJzdXBlcmNlbGw6Z2FtZWFwaSIsImp0aSI6IjcxMzBkZjBhLTNlYWQtNGQyZi05NThkLTcxMzJkNWNjYTVkYyIsImlhdCI6MTc5MjUwNjkwOSwic3ViIjoiZGV2ZWxvcGVyL2JkMDQ1MjVkLTljMDItNGJmNy1iM2JhLTc1NTI3YWQwNDk5MSIsInNjb3BlcyI6WyJjbGFzaCJdLCJsaW1pdHMiOlt7InRpZXIiOiJkZXZlbG9wZXIvc2lsdmVyIiwidHlwZSI6InRocm90dGxpbmcifSx7ImNpZHJzIjpbIjQ1Ljc5LjIxOC43OSJdLCJ0eXBlIjoiY2xpZW50In1dfQ.E5EMziuzZqcG_maxsWk9CgoobLLSIbwxWedZh8ENy95b0Z1SsbS4Ofw1eY4H6XVtW89zoMEMe-wmyv7dm5yWrw"
 )
 BASE_URL = os.environ.get("COC_BASE_URL", "https://cocproxy.royaleapi.dev/v1")
-DB_FILE = os.path.join(os.path.dirname(__file__), "coc_history.db")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 tracking_lock = threading.Lock()
 clan_sliding_history = {}    
@@ -28,70 +29,78 @@ current_day = datetime.date.today()
 # Memory store for instant live updates on the leaderboard
 live_clan_stats = {} 
 
+def get_db_connection():
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL is not set. Please add it to your Render Environment Variables.")
+    return psycopg2.connect(DATABASE_URL)
+
 def init_db():
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS clans (
-                clan_tag TEXT PRIMARY KEY,
-                clan_name TEXT,
-                is_active INTEGER DEFAULT 0
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS clan_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                clan_tag TEXT,
-                record_date TEXT,
-                month_key TEXT,
-                season_donations INTEGER,
-                season_received INTEGER,
-                latest_daily INTEGER,
-                hourly_rate INTEGER,
-                member_count INTEGER,
-                timestamp TEXT,
-                epoch INTEGER
-            )
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_clan_date ON clan_history(clan_tag, record_date);
-        """)
-        cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_clan_month ON clan_history(clan_tag, month_key);
-        """)
+    if not DATABASE_URL:
+        print("WARNING: No DATABASE_URL found. Skipping DB initialization.")
+        return
+        
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS clans (
+                    clan_tag TEXT PRIMARY KEY,
+                    clan_name TEXT,
+                    is_active INTEGER DEFAULT 0
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS clan_history (
+                    id SERIAL PRIMARY KEY,
+                    clan_tag TEXT,
+                    record_date TEXT,
+                    month_key TEXT,
+                    season_donations INTEGER,
+                    season_received INTEGER,
+                    latest_daily INTEGER,
+                    hourly_rate INTEGER,
+                    member_count INTEGER,
+                    timestamp TEXT,
+                    epoch INTEGER
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_clan_date ON clan_history(clan_tag, record_date)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_clan_month ON clan_history(clan_tag, month_key)")
         conn.commit()
 
 def init_live_stats():
-    # Preload the leaderboard state on server startup from the last known snapshot
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT c.clan_tag, c.clan_name, 
-                   COALESCE(h.season_donations, 0) as season_donations, 
-                   COALESCE(h.latest_daily, 0) as latest_daily
-            FROM clans c
-            LEFT JOIN clan_history h ON c.clan_tag = h.clan_tag
-            WHERE h.id = (
-                SELECT MAX(id) FROM clan_history 
-                WHERE clan_tag = c.clan_tag
-            ) OR h.id IS NULL
-        """)
-        for row in cur.fetchall():
-            live_clan_stats[row["clan_tag"]] = {
-                "name": row["clan_name"] or "Unknown Clan",
-                "season_donations": row["season_donations"],
-                "latest_daily": row["latest_daily"]
-            }
+    if not DATABASE_URL: return
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT c.clan_tag, c.clan_name, 
+                           COALESCE(h.season_donations, 0) as season_donations, 
+                           COALESCE(h.latest_daily, 0) as latest_daily
+                    FROM clans c
+                    LEFT JOIN clan_history h ON c.clan_tag = h.clan_tag
+                    WHERE h.id = (
+                        SELECT MAX(id) FROM clan_history 
+                        WHERE clan_tag = c.clan_tag
+                    ) OR h.id IS NULL
+                """)
+                for row in cur.fetchall():
+                    live_clan_stats[row["clan_tag"]] = {
+                        "name": row["clan_name"] or "Unknown Clan",
+                        "season_donations": row["season_donations"],
+                        "latest_daily": row["latest_daily"]
+                    }
+    except Exception as e:
+        print(f"Error loading live stats: {e}")
 
 init_db()
 init_live_stats()
 
 def clean_old_records():
+    if not DATABASE_URL: return
     cutoff = int(time.time()) - (62 * 86400)
-    with sqlite3.connect(DB_FILE) as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM clan_history WHERE epoch < ?", (cutoff,))
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM clan_history WHERE epoch < %s", (cutoff,))
         conn.commit()
 
 def get_month_keys():
@@ -591,8 +600,12 @@ HTML_PAGE = """
 
     btnDismissModal.onclick = () => playerModal.classList.remove("show");
 
-    // Initialize base history state on page load
-    history.replaceState({ page: 'home' }, '', window.location.pathname);
+    // Initialize base history state on page load based on current URL hash
+    if (window.location.hash.startsWith("#clan=")) {
+        history.replaceState({ page: 'detail' }, '', window.location.href);
+    } else {
+        history.replaceState({ page: 'home' }, '', window.location.pathname);
+    }
 
     // Add Clan UI Toggles
     btnShowAddForm.addEventListener("click", () => {
@@ -607,28 +620,28 @@ HTML_PAGE = """
       inputClan.value = "";
     });
 
-    // UI Navigation logic
+    // UI Navigation logic and History states
     function showDetailView(c_tag) {
         clanId = c_tag;
-        // Keep input field updated for later but we don't strictly need it with the new UI flow
         inputClan.value = "";
         
-        // Hide add form and show button again when transitioning views
         addClanForm.classList.add("hidden");
         btnShowAddForm.classList.remove("hidden");
 
         viewLeaderboard.classList.add("hidden");
         viewClanDetail.classList.remove("hidden");
         
-        // Push a new state so the device's back button can be caught
-        history.pushState({ page: 'detail' }, '', '#clan=' + encodeURIComponent(c_tag));
+        const newHash = '#clan=' + encodeURIComponent(c_tag);
+        // Only push state if the hash isn't already set (prevents loop on refresh)
+        if (window.location.hash !== newHash) {
+            history.pushState({ page: 'detail' }, '', newHash);
+        }
         
         fetchData();
     }
 
     // Catch hardware/browser Back Button
     window.addEventListener('popstate', (e) => {
-        // If the state is not 'detail', it means we went back to the 'home' state
         if (!e.state || e.state.page !== 'detail') {
             viewClanDetail.classList.add("hidden");
             viewLeaderboard.classList.remove("hidden");
@@ -642,7 +655,6 @@ HTML_PAGE = """
         }
     });
 
-    // The UI Back button just triggers the browser's native back function
     document.getElementById("btnBack").onclick = () => {
         history.back(); 
     };
@@ -750,7 +762,6 @@ HTML_PAGE = """
             </div>
           `;
 
-          // --- FIXED LONG PRESS LOGIC ---
           let pressTimer;
           let isLongPress = false;
           
@@ -759,37 +770,31 @@ HTML_PAGE = """
               pressTimer = setTimeout(() => {
                   isLongPress = true;
                   showDeleteOption(item, clan.clan_tag);
-              }, 500); // 500ms hold required
+              }, 500); 
           };
           
           const endPress = () => {
               clearTimeout(pressTimer);
           };
           
-          // Touch events (removed touchmove to prevent micro-jitters from cancelling the hold)
           item.addEventListener('touchstart', startPress, {passive: true});
           item.addEventListener('touchend', endPress);
           item.addEventListener('touchcancel', endPress);
-          
-          // Mouse events
           item.addEventListener('mousedown', startPress);
           item.addEventListener('mouseup', endPress);
           item.addEventListener('mouseleave', endPress);
           
-          // Prevent default mobile context menu and force our custom delete overlay
           item.addEventListener('contextmenu', (e) => {
               e.preventDefault();
               isLongPress = true;
               showDeleteOption(item, clan.clan_tag);
           });
           
-          // Click Handler
           item.onclick = (e) => {
               if (isLongPress) {
                   e.preventDefault();
                   return;
               }
-              // If user clicked the delete button inside overlay, don't open detail view
               if (e.target.closest('.del-overlay')) return;
               
               showDetailView(clan.clan_tag);
@@ -798,7 +803,6 @@ HTML_PAGE = """
           lbList.appendChild(item);
         });
 
-        // Re-apply search filter after refresh
         const currentSearch = searchClan.value;
         if (currentSearch) {
           searchClan.dispatchEvent(new Event("input"));
@@ -841,7 +845,7 @@ HTML_PAGE = """
         lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
 
         loadHistoricalLogs();
-        loadLeaderboard(); // Keep leaderboard data in sync
+        loadLeaderboard(); 
       } catch (err) {
         lblStatus.textContent = "[ ERROR ]";
         lblStatus.style.color = "#ef4444";
@@ -938,7 +942,6 @@ HTML_PAGE = """
       showDetailView(clanVal);
     });
 
-    // Real-time Leaderboard Search Filter
     searchClan.addEventListener("input", (e) => {
       const term = e.target.value.toLowerCase();
       const items = document.querySelectorAll(".lb-item");
@@ -948,9 +951,9 @@ HTML_PAGE = """
         const tag = item.querySelector(".lb-tag").textContent.toLowerCase();
         
         if (name.includes(term) || tag.includes(term)) {
-          item.style.display = "flex"; // Restore visibility
+          item.style.display = "flex"; 
         } else {
-          item.style.display = "none"; // Hide if it doesn't match
+          item.style.display = "none"; 
         }
       });
     });
@@ -958,7 +961,6 @@ HTML_PAGE = """
     setInterval(() => {
       updateDailyResetCountdown();
       
-      // If we are currently viewing a clan detail, tick down the polling timer
       if (clanId && !viewClanDetail.classList.contains("hidden")) {
         remainingTime -= 1;
         if (remainingTime <= 0) {
@@ -968,7 +970,6 @@ HTML_PAGE = """
         lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
       }
       
-      // If on the Leaderboard screen, silently refresh the list every 20 seconds
       if (!clanId || viewClanDetail.classList.contains("hidden")) {
          if (new Date().getSeconds() % 20 === 0) {
             loadLeaderboard();
@@ -976,9 +977,14 @@ HTML_PAGE = """
       }
     }, 1000);
 
-    // Initial page load functions
+    // Initial load respects the URL hash if user refreshes
     updateDailyResetCountdown();
-    loadLeaderboard();
+    if (window.location.hash.startsWith("#clan=")) {
+        const hashClan = decodeURIComponent(window.location.hash.substring(6));
+        showDetailView(hashClan);
+    } else {
+        loadLeaderboard();
+    }
   </script>
 </body>
 </html>
@@ -1075,47 +1081,45 @@ def execute_clan_poll(clan_tag):
 
         clan_hourly = max(0, season_donations_total - c_hist[0][1])
 
-        # UPDATE LIVE STATS FOR LEADERBOARD (Instant tracking)
         live_clan_stats[clan_tag] = {
             "name": clan_name,
             "season_donations": season_donations_total,
             "latest_daily": latest_daily_total
         }
 
-        # --- PERSIST TO SQLITE DATABASE ---
-        with sqlite3.connect(DB_FILE) as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO clans (clan_tag, clan_name, is_active)
-                VALUES (?, ?, 1)
-                ON CONFLICT(clan_tag) DO UPDATE SET clan_name=excluded.clan_name, is_active=1
-            """, (clan_tag, clan_name))
+        # --- PERSIST TO POSTGRES DATABASE ---
+        if DATABASE_URL:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO clans (clan_tag, clan_name, is_active)
+                        VALUES (%s, %s, 1)
+                        ON CONFLICT(clan_tag) DO UPDATE SET clan_name=EXCLUDED.clan_name, is_active=1
+                    """, (clan_tag, clan_name))
 
-            cur.execute("UPDATE clans SET is_active=0 WHERE clan_tag != ?", (clan_tag,))
+                    cur.execute("UPDATE clans SET is_active=0 WHERE clan_tag != %s", (clan_tag,))
 
-            cur.execute("""
-                SELECT epoch, timestamp FROM clan_history 
-                WHERE clan_tag = ? ORDER BY id DESC LIMIT 1
-            """, (clan_tag,))
-            last_entry = cur.fetchone()
+                    cur.execute("""
+                        SELECT epoch, timestamp FROM clan_history 
+                        WHERE clan_tag = %s ORDER BY id DESC LIMIT 1
+                    """, (clan_tag,))
+                    last_entry = cur.fetchone()
 
-            # Create the perfect top-of-the-hour label (e.g. 06:00:00 PM)
-            current_hour_label = now.strftime("%I:00:00 %p")
+                    current_hour_label = now.strftime("%I:00:00 %p")
 
-            # Only save a new entry if we haven't already saved one for this exact hour
-            if not last_entry or last_entry[1] != current_hour_label:
-                cur.execute("""
-                    INSERT INTO clan_history (
-                        clan_tag, record_date, month_key, season_donations,
-                        season_received, latest_daily, hourly_rate,
-                        member_count, timestamp, epoch
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    clan_tag, date_str, month_str, season_donations_total,
-                    season_received_total, latest_daily_total, clan_hourly,
-                    member_count, current_hour_label, current_epoch
-                ))
-            conn.commit()
+                    if not last_entry or last_entry[1] != current_hour_label:
+                        cur.execute("""
+                            INSERT INTO clan_history (
+                                clan_tag, record_date, month_key, season_donations,
+                                season_received, latest_daily, hourly_rate,
+                                member_count, timestamp, epoch
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            clan_tag, date_str, month_str, season_donations_total,
+                            season_received_total, latest_daily_total, clan_hourly,
+                            member_count, current_hour_label, current_epoch
+                        ))
+                conn.commit()
 
         payload = {
             "clan_name": clan_name,
@@ -1134,16 +1138,17 @@ def execute_clan_poll(clan_tag):
 def background_worker_loop():
     while True:
         try:
-            with sqlite3.connect(DB_FILE) as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT clan_tag FROM clans")
-                clans = cur.fetchall()
+            if DATABASE_URL:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT clan_tag FROM clans")
+                        clans = cur.fetchall()
 
-            for (c_tag,) in clans:
-                execute_clan_poll(c_tag)
-                time.sleep(2)  
+                for (c_tag,) in clans:
+                    execute_clan_poll(c_tag)
+                    time.sleep(2)  
 
-            clean_old_records()
+                clean_old_records()
 
             self_url = os.environ.get("RENDER_EXTERNAL_URL")
             if self_url:
@@ -1164,16 +1169,16 @@ def ping():
 def delete_clan():
     tag = request.args.get("tag", "").strip()
     
-    # Remove from memory instantly
     keys_to_delete = [k for k in live_clan_stats if k.lower() == tag.lower()]
     for k in keys_to_delete:
         del live_clan_stats[k]
         
-    with sqlite3.connect(DB_FILE) as conn:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM clans WHERE LOWER(clan_tag) = LOWER(?)", (tag,))
-        cur.execute("DELETE FROM clan_history WHERE LOWER(clan_tag) = LOWER(?)", (tag,))
-        conn.commit()
+    if DATABASE_URL:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM clans WHERE LOWER(clan_tag) = LOWER(%s)", (tag,))
+                cur.execute("DELETE FROM clan_history WHERE LOWER(clan_tag) = LOWER(%s)", (tag,))
+            conn.commit()
     return jsonify({"status": "deleted", "tag": tag})
 
 @app.route("/api/history")
@@ -1186,16 +1191,17 @@ def get_history():
 
     target_month = this_month if period == "current" else prev_month
 
-    with sqlite3.connect(DB_FILE) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT record_date, timestamp as time, latest_daily, hourly_rate
-            FROM clan_history
-            WHERE LOWER(clan_tag) = LOWER(?) AND month_key = ?
-            ORDER BY id DESC LIMIT 50
-        """, (clan_tag, target_month))
-        rows = [dict(r) for r in cur.fetchall()]
+    rows = []
+    if DATABASE_URL:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT record_date, timestamp as time, latest_daily, hourly_rate
+                    FROM clan_history
+                    WHERE LOWER(clan_tag) = LOWER(%s) AND month_key = %s
+                    ORDER BY id DESC LIMIT 50
+                """, (clan_tag, target_month))
+                rows = [dict(r) for r in cur.fetchall()]
 
     return jsonify({
         "period_label": target_month,
@@ -1204,7 +1210,6 @@ def get_history():
 
 @app.route("/api/leaderboard")
 def get_leaderboard():
-    # Return directly from live memory for perfectly synced data
     rows = []
     for tag, data in live_clan_stats.items():
         rows.append({
@@ -1220,13 +1225,13 @@ def get_leaderboard():
 @app.route("/api/track")
 def track():
     clan_id = request.args.get("clan_tag", "").strip()
-    if not clan_id:
-        with sqlite3.connect(DB_FILE) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT clan_tag FROM clans WHERE is_active=1 LIMIT 1")
-            row = cur.fetchone()
-            if row:
-                clan_id = row[0]
+    if not clan_id and DATABASE_URL:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT clan_tag FROM clans WHERE is_active=1 LIMIT 1")
+                row = cur.fetchone()
+                if row:
+                    clan_id = row[0]
 
     if not clan_id:
         return jsonify({"error": "No Clan Tag registered"}), 400
