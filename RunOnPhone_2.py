@@ -553,9 +553,15 @@ HTML_PAGE = """
       </div>
 
       <!-- Members Section Header -->
-      <div class="section-header">
+      <div class="section-header" style="flex-wrap: wrap; gap: 8px;">
         <span class="sec-title">CLAN MEMBERS | DONATION ROSTER</span>
-        <span class="sec-sub" id="lblMemberSummary">0/50 Members</span>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <select id="sortMembers" style="background: #172233; color: var(--neon-cyan); border: 1px solid var(--card-border); border-radius: 4px; font-size: 10px; padding: 2px 4px; outline: none; cursor: pointer;">
+            <option value="donations">Sort: Donations</option>
+            <option value="level">Sort: Level</option>
+          </select>
+          <span class="sec-sub" id="lblMemberSummary">0/50 Members</span>
+        </div>
       </div>
 
       <!-- Members Scroll Container -->
@@ -599,6 +605,8 @@ HTML_PAGE = """
     let clanId = "";
     let activeMonthTab = "current";
     let remainingTime = INTERVAL_SECONDS;
+    let currentPlayers = [];
+    let currentSort = "donations";
     
     // --- ADMIN LOGIC ---
     let adminKey = localStorage.getItem("coctracker_admin_key") || "";
@@ -684,8 +692,29 @@ HTML_PAGE = """
     const mPlayerTag = document.getElementById("mPlayerTag");
     const mModalBody = document.getElementById("mModalBody");
     const btnDismissModal = document.getElementById("btnDismissModal");
+    
+    const sortMembersSelect = document.getElementById("sortMembers");
 
     btnDismissModal.onclick = () => playerModal.classList.remove("show");
+
+    sortMembersSelect.addEventListener("change", (e) => {
+        currentSort = e.target.value;
+        applySortAndRender();
+    });
+
+    function applySortAndRender() {
+        if (!currentPlayers || currentPlayers.length === 0) return;
+        
+        let sortedPlayers = [...currentPlayers];
+        
+        if (currentSort === "donations") {
+            sortedPlayers.sort((a, b) => b.donations - a.donations);
+        } else if (currentSort === "level") {
+            sortedPlayers.sort((a, b) => b.expLevel - a.expLevel);
+        }
+        
+        renderMembers(sortedPlayers);
+    }
 
     // Initialize base history state on page load based on current URL hash
     if (window.location.hash.startsWith("#clan=")) {
@@ -956,7 +985,8 @@ HTML_PAGE = """
         valLatestDaily.textContent = `+${Number(data.latest_daily).toLocaleString()}`;
         valClanHourly.textContent = Number(data.clan_hourly).toLocaleString();
 
-        renderMembers(data.players);
+        currentPlayers = data.players;
+        applySortAndRender();
 
         lblFooterLeft.textContent = `◷ Updated: ${data.timestamp}`;
         remainingTime = INTERVAL_SECONDS;
@@ -1340,13 +1370,14 @@ def get_7day_history():
     if DATABASE_URL:
         with get_db_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # Group by day and grab the maximum latest_daily value reached before the reset
+                # Get the final recorded value for each day exactly at reset time
                 cur.execute("""
-                    SELECT record_date, MAX(latest_daily) as max_daily
+                    SELECT DISTINCT ON (record_date) 
+                        record_date, 
+                        latest_daily as max_daily
                     FROM clan_history
                     WHERE LOWER(clan_tag) = LOWER(%s)
-                    GROUP BY record_date
-                    ORDER BY record_date DESC
+                    ORDER BY record_date DESC, id DESC
                     LIMIT 7
                 """, (clan_tag,))
                 rows = [dict(r) for r in cur.fetchall()]
