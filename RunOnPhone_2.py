@@ -33,8 +33,9 @@ def get_game_day():
 
 current_day = get_game_day()
 
-# Memory store for instant live updates on the leaderboard
+# Memory stores for instant live updates
 live_clan_stats = {} 
+live_players_cache = {} # Caches players across all clans for the Top 200 list
 
 def get_db_connection():
     if not DATABASE_URL:
@@ -443,8 +444,8 @@ HTML_PAGE = """
     <!-- Top Header (Always Visible) -->
     <div class="card header-card">
       <div>
-        <div class="clan-title" id="clanTitle">COCTRACKER // MULTI-CLAN</div>
-        <div class="sub-info" id="subInfo">Global Database</div>
+        <div class="clan-title" id="clanTitle">COCTRACKER</div>
+        <div class="sub-info" id="subInfo">By LengAn</div>
       </div>
       <div style="display: flex; align-items: center;">
         <div class="badge-status" id="lblStatus">[ STANDBY ]</div>
@@ -455,12 +456,17 @@ HTML_PAGE = """
     <!-- VIEW 1: LEADERBOARD FRONT PAGE -->
     <div id="viewLeaderboard" class="view-container">
       <!-- Clan Leaderboard Section -->
-      <div class="leaderboard-header">🏆 GLOBAL CLAN RANKINGS</div>
+      <div class="leaderboard-header">🏆 CLAN RANKINGS</div>
       
-      <!-- Action Bar (Search & Add Clan) -->
+      <!-- Action Bar (Search, Top Players & Add Clan) -->
       <div style="display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px 0;">
         <input type="text" id="searchClan" placeholder="Search by Clan Name or Tag..." autocapitalize="none" />
         
+        <!-- Toggle Button for Top Players -->
+        <button class="btn-apply" id="btnShowTopPlayers" style="background-color: #6d28d9;">
+          <span>⭐</span> TOP 200 PLAYERS (BY LEVEL)
+        </button>
+
         <!-- Toggle Button for Add Clan -->
         <button class="btn-apply" id="btnShowAddForm">
           <span>+</span> ADD NEW CLAN
@@ -573,6 +579,15 @@ HTML_PAGE = """
         <span class="footer-right" id="lblFooterRight">Next Poll: 60s</span>
       </div>
     </div>
+    
+    <!-- VIEW 3: GLOBAL TOP PLAYERS -->
+    <div id="viewTopPlayers" class="view-container hidden">
+      <button class="btn-back-nav" id="btnBackFromTop">← BACK TO RANKINGS</button>
+      <div class="leaderboard-header" style="color: var(--neon-purple);">⭐ TOP 200 PLAYERS</div>
+      <div class="members-list" id="topPlayersList" style="margin-top: 8px;">
+          <div style="font-size:11px; color:var(--text-muted); text-align:center;">Loading players...</div>
+      </div>
+    </div>
   </div>
 
   <!-- Player Telemetry Modal -->
@@ -659,6 +674,7 @@ HTML_PAGE = """
     // View Containers
     const viewLeaderboard = document.getElementById("viewLeaderboard");
     const viewClanDetail = document.getElementById("viewClanDetail");
+    const viewTopPlayers = document.getElementById("viewTopPlayers");
 
     const clanTitle = document.getElementById("clanTitle");
     const subInfo = document.getElementById("subInfo");
@@ -667,10 +683,14 @@ HTML_PAGE = """
     // Form and Search Elements
     const searchClan = document.getElementById("searchClan");
     const btnShowAddForm = document.getElementById("btnShowAddForm");
+    const btnShowTopPlayers = document.getElementById("btnShowTopPlayers");
     const addClanForm = document.getElementById("addClanForm");
     const btnCancelAdd = document.getElementById("btnCancelAdd");
     const inputClan = document.getElementById("inputClan");
     const btnApply = document.getElementById("btnApply");
+    
+    const btnBackFromTop = document.getElementById("btnBackFromTop");
+    const topPlayersList = document.getElementById("topPlayersList");
 
     const lblCountdown = document.getElementById("lblCountdown");
     const lblMemberSummary = document.getElementById("lblMemberSummary");
@@ -719,6 +739,8 @@ HTML_PAGE = """
     // Initialize base history state on page load based on current URL hash
     if (window.location.hash.startsWith("#clan=")) {
         history.replaceState({ page: 'detail' }, '', window.location.href);
+    } else if (window.location.hash === "#top") {
+        history.replaceState({ page: 'top' }, '', window.location.href);
     } else {
         history.replaceState({ page: 'home' }, '', window.location.pathname);
     }
@@ -745,10 +767,10 @@ HTML_PAGE = """
         btnShowAddForm.classList.remove("hidden");
 
         viewLeaderboard.classList.add("hidden");
+        viewTopPlayers.classList.add("hidden");
         viewClanDetail.classList.remove("hidden");
         
         const newHash = '#clan=' + encodeURIComponent(c_tag);
-        // Only push state if the hash isn't already set (prevents loop on refresh)
         if (window.location.hash !== newHash) {
             history.pushState({ page: 'detail' }, '', newHash);
         }
@@ -756,24 +778,98 @@ HTML_PAGE = """
         fetchData();
     }
 
+    // Top Players Viewer
+    async function loadTopPlayers() {
+        viewLeaderboard.classList.add("hidden");
+        viewClanDetail.classList.add("hidden");
+        viewTopPlayers.classList.remove("hidden");
+        
+        topPlayersList.innerHTML = `<div style="font-size:11px; color:var(--text-muted); text-align:center;">Loading top players...</div>`;
+        
+        try {
+            const res = await fetch("/api/top_players");
+            const data = await res.json();
+            
+            topPlayersList.innerHTML = "";
+            if (!data.players || data.players.length === 0) {
+                topPlayersList.innerHTML = `<div style="font-size:11px; color:var(--text-muted); text-align:center;">No player data available yet. Please wait for the first sync.</div>`;
+                return;
+            }
+            
+            data.players.forEach((p, idx) => {
+                const rank = idx + 1;
+                let rankClass = "rank-def";
+                if (rank === 1) rankClass = "rank-1";
+                else if (rank === 2) rankClass = "rank-2";
+                else if (rank === 3) rankClass = "rank-3";
+
+                const cleanRole = p.role.replace("ADMIN", "ELDER");
+                const clanBadge = p.clan_name ? `<div style="font-size: 9.5px; color: var(--neon-purple); margin-top:2px; font-weight:bold;">🛡️ ${escapeHtml(p.clan_name)}</div>` : "";
+                
+                const card = document.createElement("div");
+                card.className = "member-card";
+                card.onclick = () => openPlayerModal(p);
+
+                card.innerHTML = `
+                  <div class="member-top-bar">
+                    <div class="rank-box ${rankClass}" style="width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:bold; font-size:11px; flex-shrink:0;">${rank}</div>
+                    <div class="exp-badge">★ ${p.expLevel}</div>
+                    <div class="member-info-col">
+                      <span class="player-name">${escapeHtml(p.name)}</span>
+                      <span class="player-tag">${escapeHtml(p.tag)}</span>
+                      ${clanBadge}
+                    </div>
+                    <div class="role-badge">👑 ${escapeHtml(cleanRole)}</div>
+                  </div>
+                  <div class="member-stats-grid" style="grid-template-columns: 1fr 1fr;">
+                    <div class="stats-col">
+                      <span class="stats-col-title">TODAY</span>
+                      <div class="stat-line"><span style="color:var(--neon-emerald)">+${p.daily.toLocaleString()}</span> <span class="stat-lbl">DONATED</span></div>
+                    </div>
+                    <div class="stats-col">
+                      <span class="stats-col-title">SEASON</span>
+                      <div class="stat-line"><span style="color:var(--neon-amber)">+${p.donations.toLocaleString()}</span> <span class="stat-lbl">DONATED</span></div>
+                    </div>
+                  </div>
+                `;
+                topPlayersList.appendChild(card);
+            });
+        } catch (e) {
+            topPlayersList.innerHTML = `<div style="font-size:11px; color:#ef4444; text-align:center;">Error loading players.</div>`;
+        }
+    }
+    
+    btnShowTopPlayers.addEventListener("click", () => {
+        history.pushState({ page: 'top' }, '', '#top');
+        loadTopPlayers();
+    });
+
     // Catch hardware/browser Back Button
     window.addEventListener('popstate', (e) => {
-        if (!e.state || e.state.page !== 'detail') {
+        if (e.state && e.state.page === 'detail') {
+            viewLeaderboard.classList.add("hidden");
+            viewTopPlayers.classList.add("hidden");
+            viewClanDetail.classList.remove("hidden");
+        } else if (e.state && e.state.page === 'top') {
+            viewLeaderboard.classList.add("hidden");
             viewClanDetail.classList.add("hidden");
+            viewTopPlayers.classList.remove("hidden");
+        } else {
+            viewClanDetail.classList.add("hidden");
+            viewTopPlayers.classList.add("hidden");
             viewLeaderboard.classList.remove("hidden");
             clanId = "";
             
-            clanTitle.textContent = "COCTRACKER // MULTI-CLAN";
-            subInfo.textContent = "Global Database";
+            clanTitle.textContent = "COCTRACKER";
+            subInfo.textContent = "By LengAn";
             subInfo.style.color = "var(--text-muted)";
             lblStatus.textContent = "[ STANDBY ]";
             lblStatus.style.color = "var(--text-muted)";
         }
     });
 
-    document.getElementById("btnBack").onclick = () => {
-        history.back(); 
-    };
+    document.getElementById("btnBack").onclick = () => { history.back(); };
+    btnBackFromTop.onclick = () => { history.back(); };
 
     function selectMonthTab(tab) {
       activeMonthTab = tab;
@@ -867,7 +963,6 @@ HTML_PAGE = """
         
         element.appendChild(overlay);
         
-        // Auto-remove the delete prompt after 4 seconds if ignored
         setTimeout(() => {
             if(overlay.parentNode) overlay.parentNode.removeChild(overlay);
         }, 4000);
@@ -911,7 +1006,7 @@ HTML_PAGE = """
           let isLongPress = false;
           
           const startPress = (e) => {
-              if (!isAdmin) return; // Prevent deleting entirely if not admin
+              if (!isAdmin) return;
               isLongPress = false;
               pressTimer = setTimeout(() => {
                   isLongPress = true;
@@ -1118,7 +1213,7 @@ HTML_PAGE = """
         lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
       }
       
-      if (!clanId || viewClanDetail.classList.contains("hidden")) {
+      if ((!clanId || viewClanDetail.classList.contains("hidden")) && viewTopPlayers.classList.contains("hidden")) {
          if (new Date().getSeconds() % 20 === 0) {
             loadLeaderboard();
          }
@@ -1130,6 +1225,8 @@ HTML_PAGE = """
     if (window.location.hash.startsWith("#clan=")) {
         const hashClan = decodeURIComponent(window.location.hash.substring(6));
         showDetailView(hashClan);
+    } else if (window.location.hash === "#top") {
+        loadTopPlayers();
     } else {
         loadLeaderboard();
     }
@@ -1139,7 +1236,7 @@ HTML_PAGE = """
 """
 
 def execute_clan_poll(clan_tag):
-    global current_day, clan_sliding_history, player_sliding_history, player_baselines, live_clan_stats
+    global current_day, clan_sliding_history, player_sliding_history, player_baselines, live_clan_stats, live_players_cache
 
     with tracking_lock:
         if not clan_tag:
@@ -1234,6 +1331,9 @@ def execute_clan_poll(clan_tag):
             "season_donations": season_donations_total,
             "latest_daily": latest_daily_total
         }
+        
+        # Save parsed players in memory for the Top 200 route
+        live_players_cache[clan_tag] = parsed_members
 
         # --- PERSIST TO POSTGRES DATABASE ---
         if DATABASE_URL:
@@ -1324,6 +1424,8 @@ def delete_clan():
     keys_to_delete = [k for k in live_clan_stats if k.lower() == tag.lower()]
     for k in keys_to_delete:
         del live_clan_stats[k]
+        if k in live_players_cache:
+            del live_players_cache[k]
         
     if DATABASE_URL:
         with get_db_connection() as conn:
@@ -1397,6 +1499,23 @@ def get_leaderboard():
         
     rows.sort(key=lambda x: x["season_donations"], reverse=True)
     return jsonify({"leaderboard": rows})
+
+@app.route("/api/top_players")
+def get_top_players():
+    # Gather players from all clans stored in memory
+    all_players = []
+    for clan_tag, players in live_players_cache.items():
+        clan_name = live_clan_stats.get(clan_tag, {}).get("name", "Unknown Clan")
+        for p in players:
+            p_copy = p.copy()
+            p_copy["clan_name"] = clan_name 
+            all_players.append(p_copy)
+            
+    # Sort globally by expLevel from highest to lowest
+    all_players.sort(key=lambda x: x.get("expLevel", 0), reverse=True)
+    
+    # Return the top 200
+    return jsonify({"players": all_players[:200]})
 
 @app.route("/api/track")
 def track():
