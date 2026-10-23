@@ -222,6 +222,9 @@ HTML_PAGE = """
       text-overflow: ellipsis;
       letter-spacing: 0.5px;
       cursor: pointer;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none;
     }
     .sub-info {
       font-size: 10px;
