@@ -1386,25 +1386,35 @@ def execute_clan_poll(clan_tag):
 def background_worker_loop():
     while True:
         try:
+            # 1. Gather all clans from memory
+            clans_to_sync = set(live_clan_stats.keys())
+            
+            # 2. Add any saved clans from the database (if connected)
             if DATABASE_URL:
-                with get_db_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT clan_tag FROM clans")
-                        clans = cur.fetchall()
+                try:
+                    with get_db_connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT clan_tag FROM clans")
+                            for (c_tag,) in cur.fetchall():
+                                clans_to_sync.add(c_tag)
+                    clean_old_records()
+                except Exception as e:
+                    print(f"DB Error: {e}")
 
-                for (c_tag,) in clans:
-                    execute_clan_poll(c_tag)
-                    time.sleep(2)  
-
-                clean_old_records()
+            # 3. Poll the Supercell API for every clan in the background
+            for c_tag in clans_to_sync:
+                execute_clan_poll(c_tag)
+                time.sleep(2)  # Slight delay to prevent rate-limiting
 
             self_url = os.environ.get("RENDER_EXTERNAL_URL")
             if self_url:
                 requests.get(f"{self_url}/api/ping", timeout=5)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Background worker error: {e}")
+            
+        # Wait 60 seconds before syncing everything again
         time.sleep(60)
-
+        
 @app.route("/")
 def index():
     return render_template_string(HTML_PAGE)
