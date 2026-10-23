@@ -204,6 +204,7 @@ HTML_PAGE = """
       overflow: hidden;
       text-overflow: ellipsis;
       letter-spacing: 0.5px;
+      cursor: pointer;
     }
     .sub-info {
       font-size: 10px;
@@ -444,7 +445,7 @@ HTML_PAGE = """
     <!-- Top Header (Always Visible) -->
     <div class="card header-card">
       <div>
-        <div class="clan-title" id="clanTitle">COCTRACKER</div>
+        <div class="clan-title" id="clanTitle">COC TRACKER</div>
         <div class="sub-info" id="subInfo">By LengAn</div>
       </div>
       <div style="display: flex; align-items: center;">
@@ -456,7 +457,7 @@ HTML_PAGE = """
     <!-- VIEW 1: LEADERBOARD FRONT PAGE -->
     <div id="viewLeaderboard" class="view-container">
       <!-- Clan Leaderboard Section -->
-      <div class="leaderboard-header">🏆 CLAN RANKINGS</div>
+      <div class="leaderboard-header">🏆 GLOBAL CLAN RANKINGS</div>
       
       <!-- Action Bar (Search, Top Players & Add Clan) -->
       <div style="display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px 0;">
@@ -464,7 +465,7 @@ HTML_PAGE = """
         
         <!-- Toggle Button for Top Players -->
         <button class="btn-apply" id="btnShowTopPlayers" style="background-color: #6d28d9;">
-          <span>⭐</span> TOP 200 PLAYERS (BY LEVEL)
+          <span>⭐</span> GLOBAL TOP 200 PLAYERS (BY LEVEL)
         </button>
 
         <!-- Toggle Button for Add Clan -->
@@ -572,23 +573,23 @@ HTML_PAGE = """
 
       <!-- Members Scroll Container -->
       <div class="members-list" id="membersList"></div>
+    </div> <!-- Close viewClanDetail here -->
 
-      <!-- Telemetry Footer -->
-      <div class="card footer-card">
-        <span class="footer-left" id="lblFooterLeft">◷ Updated: Standby</span>
-        <span class="footer-right" id="lblFooterRight">Next Poll: 60s</span>
-      </div>
-    </div>
-    
     <!-- VIEW 3: GLOBAL TOP PLAYERS -->
     <div id="viewTopPlayers" class="view-container hidden">
       <button class="btn-back-nav" id="btnBackFromTop">← BACK TO RANKINGS</button>
-      <div class="leaderboard-header" style="color: var(--neon-purple);">⭐ TOP 200 PLAYERS</div>
+      <div class="leaderboard-header" style="color: var(--neon-purple);">⭐ GLOBAL TOP 200 PLAYERS</div>
       <div class="members-list" id="topPlayersList" style="margin-top: 8px;">
           <div style="font-size:11px; color:var(--text-muted); text-align:center;">Loading players...</div>
       </div>
     </div>
-  </div>
+
+    <!-- Telemetry Footer (MOVED HERE so it shows on all screens) -->
+    <div class="card footer-card" style="margin-top: 10px;">
+      <span class="footer-left" id="lblFooterLeft">◷ Updated: Standby</span>
+      <span class="footer-right" id="lblFooterRight">Next Poll: 60s</span>
+    </div>
+  </div> <!-- Close app-window -->
 
   <!-- Player Telemetry Modal -->
   <div class="modal-backdrop" id="playerModal">
@@ -677,6 +678,12 @@ HTML_PAGE = """
     const viewTopPlayers = document.getElementById("viewTopPlayers");
 
     const clanTitle = document.getElementById("clanTitle");
+
+    // Add this event listener to reload the page or navigate home
+    clanTitle.addEventListener("click", () => {
+      window.location.href = "/"; // Navigates to the root to cleanly reload the app
+    });
+
     const subInfo = document.getElementById("subInfo");
     const lblStatus = document.getElementById("lblStatus");
     
@@ -860,7 +867,7 @@ HTML_PAGE = """
             viewLeaderboard.classList.remove("hidden");
             clanId = "";
             
-            clanTitle.textContent = "COCTRACKER";
+            clanTitle.textContent = "COC TRACKER";
             subInfo.textContent = "By LengAn";
             subInfo.style.color = "var(--text-muted)";
             lblStatus.textContent = "[ STANDBY ]";
@@ -1084,8 +1091,8 @@ HTML_PAGE = """
         applySortAndRender();
 
         lblFooterLeft.textContent = `◷ Updated: ${data.timestamp}`;
-        remainingTime = INTERVAL_SECONDS;
-        lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
+        lblStatus.textContent = "[ STANDBY ]";
+        lblStatus.style.color = "var(--text-muted)";
 
         loadHistoricalLogs();
         loadLeaderboard(); 
@@ -1200,24 +1207,105 @@ HTML_PAGE = """
         }
       });
     });
+    
+    async function syncAllClans() {
+      try {
+        lblFooterLeft.textContent = `◷ Syncing all clans...`;
+        lblStatus.textContent = "[ SYNCING ]";
+        lblStatus.style.color = "var(--neon-cyan)";
+        
+        const res = await fetch("/api/sync_all");
+        const data = await res.json();
+        
+        if (!res.ok) throw new Error("Sync failed");
+        
+        // Re-render leaderboard with fresh data
+        const lbList = document.getElementById("leaderboardList");
+        lbList.innerHTML = "";
+        
+        if (data.leaderboard && data.leaderboard.length > 0) {
+            data.leaderboard.forEach((clan, index) => {
+              const rank = index + 1;
+              let rankClass = rank === 1 ? "rank-1" : rank === 2 ? "rank-2" : rank === 3 ? "rank-3" : "";
+              const item = document.createElement("div");
+              item.className = "lb-item";
+              item.innerHTML = `
+                <div class="lb-rank ${rankClass}">${rank}</div>
+                <div class="lb-details">
+                  <span class="lb-name">${escapeHtml(clan.clan_name || "Unknown Clan")}</span>
+                  <span class="lb-tag">${escapeHtml(clan.clan_tag)}</span>
+                </div>
+                <div class="lb-stats">
+                  <span class="lb-total">${Number(clan.season_donations).toLocaleString()}</span>
+                  <span class="lb-daily">+${Number(clan.latest_daily).toLocaleString()} today</span>
+                </div>
+              `;
+              
+              let pressTimer;
+              let isLongPress = false;
+              
+              const startPress = (e) => {
+                  if (!isAdmin) return;
+                  isLongPress = false;
+                  pressTimer = setTimeout(() => {
+                      isLongPress = true;
+                      showDeleteOption(item, clan.clan_tag);
+                  }, 500); 
+              };
+              const endPress = () => clearTimeout(pressTimer);
+              
+              item.addEventListener('touchstart', startPress, {passive: true});
+              item.addEventListener('touchend', endPress);
+              item.addEventListener('touchcancel', endPress);
+              item.addEventListener('mousedown', startPress);
+              item.addEventListener('mouseup', endPress);
+              item.addEventListener('mouseleave', endPress);
+              
+              item.addEventListener('contextmenu', (e) => {
+                  if (!isAdmin) return;
+                  e.preventDefault();
+                  isLongPress = true;
+                  showDeleteOption(item, clan.clan_tag);
+              });
+
+              item.onclick = (e) => {
+                  if (isLongPress) {
+                      e.preventDefault();
+                      return;
+                  }
+                  if (!e.target.closest('.del-overlay')) showDetailView(clan.clan_tag);
+              };
+              lbList.appendChild(item);
+            });
+        }
+        
+        lblFooterLeft.textContent = `◷ Updated: ${data.timestamp}`;
+        lblStatus.textContent = "[ STANDBY ]";
+        lblStatus.style.color = "var(--text-muted)";
+      } catch (e) {
+        console.error("Bulk sync error", e);
+        lblFooterLeft.textContent = `◷ Sync Failed`;
+        lblStatus.textContent = "[ ERROR ]";
+        lblStatus.style.color = "#ef4444";
+      }
+    }
 
     setInterval(() => {
       updateDailyResetCountdown();
       
-      if (clanId && !viewClanDetail.classList.contains("hidden")) {
-        remainingTime -= 1;
-        if (remainingTime <= 0) {
-          remainingTime = INTERVAL_SECONDS;
+      remainingTime -= 1;
+      
+      if (remainingTime <= 0) {
+        remainingTime = INTERVAL_SECONDS;
+        
+        if (clanId && !viewClanDetail.classList.contains("hidden")) {
           fetchData();
+        } else if (!clanId || !viewLeaderboard.classList.contains("hidden")) {
+          syncAllClans();
         }
-        lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
       }
       
-      if ((!clanId || viewClanDetail.classList.contains("hidden")) && viewTopPlayers.classList.contains("hidden")) {
-         if (new Date().getSeconds() % 20 === 0) {
-            loadLeaderboard();
-         }
-      }
+      lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
     }, 1000);
 
     // Initial load respects the URL hash if user refreshes
@@ -1386,35 +1474,25 @@ def execute_clan_poll(clan_tag):
 def background_worker_loop():
     while True:
         try:
-            # 1. Gather all clans from memory
-            clans_to_sync = set(live_clan_stats.keys())
-            
-            # 2. Add any saved clans from the database (if connected)
             if DATABASE_URL:
-                try:
-                    with get_db_connection() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute("SELECT clan_tag FROM clans")
-                            for (c_tag,) in cur.fetchall():
-                                clans_to_sync.add(c_tag)
-                    clean_old_records()
-                except Exception as e:
-                    print(f"DB Error: {e}")
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT clan_tag FROM clans")
+                        clans = cur.fetchall()
 
-            # 3. Poll the Supercell API for every clan in the background
-            for c_tag in clans_to_sync:
-                execute_clan_poll(c_tag)
-                time.sleep(2)  # Slight delay to prevent rate-limiting
+                for (c_tag,) in clans:
+                    execute_clan_poll(c_tag)
+                    time.sleep(2)  
+
+                clean_old_records()
 
             self_url = os.environ.get("RENDER_EXTERNAL_URL")
             if self_url:
                 requests.get(f"{self_url}/api/ping", timeout=5)
-        except Exception as e:
-            print(f"Background worker error: {e}")
-            
-        # Wait 60 seconds before syncing everything again
+        except Exception:
+            pass
         time.sleep(60)
-        
+
 @app.route("/")
 def index():
     return render_template_string(HTML_PAGE)
@@ -1422,6 +1500,50 @@ def index():
 @app.route("/api/ping")
 def ping():
     return jsonify({"status": "active", "time": time.time()})
+
+@app.route("/api/sync_all")
+def sync_all_clans():
+    updated_clans = 0
+    clan_tags_to_sync = []
+    
+    # Check database first, fallback to memory if no DB exists
+    if DATABASE_URL:
+        try:
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT clan_tag FROM clans")
+                    clans = cur.fetchall()
+                    clan_tags_to_sync = [c[0] for c in clans]
+        except Exception as e:
+            print(f"DB Error during sync: {e}")
+            clan_tags_to_sync = list(live_clan_stats.keys())
+    else:
+        clan_tags_to_sync = list(live_clan_stats.keys())
+            
+    for c_tag in clan_tags_to_sync:
+        execute_clan_poll(c_tag)
+        updated_clans += 1
+        time.sleep(0.1) # Small delay to prevent API rate-limiting spikes
+        
+    # Return the newly updated leaderboard
+    rows = []
+    for tag, data in live_clan_stats.items():
+        rows.append({
+            "clan_tag": tag,
+            "clan_name": data["name"],
+            "season_donations": data["season_donations"],
+            "latest_daily": data["latest_daily"]
+        })
+        
+    rows.sort(key=lambda x: x["season_donations"], reverse=True)
+    
+    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7)))
+    return jsonify({
+        "status": "success", 
+        "updated_count": updated_clans,
+        "leaderboard": rows,
+        "timestamp": now.strftime("%I:%M:%S %p")
+    })
 
 @app.route("/api/clans/delete", methods=["POST"])
 def delete_clan():
