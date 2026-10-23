@@ -73,6 +73,15 @@ def init_db():
             """)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_clan_date ON clan_history(clan_tag, record_date)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_clan_month ON clan_history(clan_tag, month_key)")
+            
+            # Persist player baselines
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS player_baselines (
+                    player_key TEXT PRIMARY KEY,
+                    baseline_donations INTEGER,
+                    last_updated DATE
+                )
+            """)
         conn.commit()
 
 def init_live_stats():
@@ -97,6 +106,14 @@ def init_live_stats():
                         "season_donations": row["season_donations"],
                         "latest_daily": row["latest_daily"]
                     }
+                
+                # Load baselines from DB
+                cur.execute("SELECT player_key, baseline_donations, last_updated FROM player_baselines")
+                today = get_game_day()
+                for row in cur.fetchall():
+                    if row["last_updated"] == today:
+                        player_baselines[row["player_key"]] = row["baseline_donations"]
+
     except Exception as e:
         print(f"Error loading live stats: {e}")
 
@@ -457,7 +474,7 @@ HTML_PAGE = """
     <!-- VIEW 1: LEADERBOARD FRONT PAGE -->
     <div id="viewLeaderboard" class="view-container">
       <!-- Clan Leaderboard Section -->
-      <div class="leaderboard-header">🏆 GLOBAL CLAN RANKINGS</div>
+      <div class="leaderboard-header">🏆 CLAN RANKINGS</div>
       
       <!-- Action Bar (Search, Top Players & Add Clan) -->
       <div style="display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px 0;">
@@ -465,7 +482,7 @@ HTML_PAGE = """
         
         <!-- Toggle Button for Top Players -->
         <button class="btn-apply" id="btnShowTopPlayers" style="background-color: #6d28d9;">
-          <span>⭐</span> GLOBAL TOP 200 PLAYERS (BY LEVEL)
+          <span>⭐</span> TOP 200 PLAYERS (BY LEVEL)
         </button>
 
         <!-- Toggle Button for Add Clan -->
@@ -578,7 +595,7 @@ HTML_PAGE = """
     <!-- VIEW 3: GLOBAL TOP PLAYERS -->
     <div id="viewTopPlayers" class="view-container hidden">
       <button class="btn-back-nav" id="btnBackFromTop">← BACK TO RANKINGS</button>
-      <div class="leaderboard-header" style="color: var(--neon-purple);">⭐ GLOBAL TOP 200 PLAYERS</div>
+      <div class="leaderboard-header" style="color: var(--neon-purple);">⭐ TOP 200 PLAYERS</div>
       <div class="members-list" id="topPlayersList" style="margin-top: 8px;">
           <div style="font-size:11px; color:var(--text-muted); text-align:center;">Loading players...</div>
       </div>
@@ -1353,6 +1370,12 @@ def execute_clan_poll(clan_tag):
         if game_day != current_day:
             current_day = game_day
             player_baselines.clear()
+            # Clear old baselines from DB on a new day
+            if DATABASE_URL:
+                with get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("DELETE FROM player_baselines")
+                    conn.commit()
 
         clan_name = raw_clan_data.get("name", "Unknown Clan")
         member_count = raw_clan_data.get("members", len(raw_clan_data.get("memberList", [])))
@@ -1378,6 +1401,17 @@ def execute_clan_poll(clan_tag):
 
             if p_key not in player_baselines or donations < player_baselines[p_key]:
                 player_baselines[p_key] = donations
+                # Save the new baseline to the database
+                if DATABASE_URL:
+                    with get_db_connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                INSERT INTO player_baselines (player_key, baseline_donations, last_updated)
+                                VALUES (%s, %s, %s)
+                                ON CONFLICT (player_key) DO UPDATE 
+                                SET baseline_donations = EXCLUDED.baseline_donations, last_updated = EXCLUDED.last_updated
+                            """, (p_key, donations, game_day))
+                        conn.commit()
 
             daily = donations - player_baselines[p_key]
             latest_daily_total += daily
