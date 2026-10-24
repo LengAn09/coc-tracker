@@ -24,7 +24,10 @@ ADMIN_SECRET = os.environ.get("ADMIN_PASSWORD", "admin123")
 tracking_lock = threading.Lock()
 clan_sliding_history = {}    
 player_sliding_history = {}  
-player_baselines = {}        
+player_baselines = {}
+clan_current_day = {}
+clan_hourly_baselines = {}
+clan_current_hour = {}
 
 def get_game_day():
     # CoC "Daily" reset at 5:00 AM UTC (10:30 AM IST)
@@ -479,17 +482,20 @@ HTML_PAGE = """
       <!-- Clan Leaderboard Section -->
       <div class="leaderboard-header">🏆 CLAN RANKINGS</div>
       
-      <!-- Action Bar (Search, Top Players & Add Clan) -->
+      <!-- Action Bar (Search, Top Players, Refresh & Add Clan) -->
       <div style="display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px 0;">
         <input type="text" id="searchClan" placeholder="Search by Clan Name or Tag..." autocapitalize="none" />
         
-        <!-- Toggle Button for Top Players -->
-        <button class="btn-apply" id="btnShowTopPlayers" style="background-color: #6d28d9;">
-          <span>⭐</span> TOP 200 PLAYERS (BY LEVEL)
-        </button>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn-back-nav" id="btnShowTopPlayers" style="flex: 1; color: var(--neon-purple);">
+            <span>⭐</span> TOP 200 PLAYERS
+          </button>
+          <button class="btn-back-nav" id="btnRefreshMain" style="flex: 1; color: var(--neon-emerald);">
+            <span>↻</span> Refresh
+          </button>
+        </div>
 
-        <!-- Toggle Button for Add Clan -->
-        <button class="btn-apply" id="btnShowAddForm">
+        <button class="btn-back-nav" id="btnShowAddForm" style="color: var(--neon-cyan);">
           <span>+</span> ADD NEW CLAN
         </button>
 
@@ -501,6 +507,12 @@ HTML_PAGE = """
             <button class="btn-back-nav" id="btnCancelAdd" style="flex: 1;">CANCEL</button>
           </div>
         </div>
+      </div>
+
+      <!-- STATUS BAR FRONT PAGE -->
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 6px; font-size: 10px; margin-bottom: 2px;">
+        <span class="sync-updated-text" style="color: var(--text-muted);">◷ Updated: Standby</span>
+        <span class="sync-next-text" style="color: var(--neon-cyan); font-weight: 700;">Next Refresh: 60s</span>
       </div>
 
       <div class="lb-list" id="leaderboardList">
@@ -591,6 +603,12 @@ HTML_PAGE = """
         </div>
       </div>
 
+      <!-- STATUS BAR FOR CLAN VIEW -->
+      <div style="display: flex; justify-content: space-between; align-items: center; padding: 4px 6px; font-size: 10px; margin-top: 4px; margin-bottom: 2px;">
+        <span class="sync-updated-text" style="color: var(--text-muted);">◷ Updated: Standby</span>
+        <span class="sync-next-text" style="color: var(--neon-cyan); font-weight: 700;">Next Refresh: 60s</span>
+      </div>
+
       <!-- Members Scroll Container -->
       <div class="members-list" id="membersList"></div>
     </div> <!-- Close viewClanDetail here -->
@@ -604,11 +622,6 @@ HTML_PAGE = """
       </div>
     </div>
 
-    <!-- Telemetry Footer (MOVED HERE so it shows on all screens) -->
-    <div class="card footer-card" style="margin-top: 10px;">
-      <span class="footer-left" id="lblFooterLeft">◷ Updated: Standby</span>
-      <span class="footer-right" id="lblFooterRight">Next Poll: 60s</span>
-    </div>
   </div> <!-- Close app-window -->
 
   <!-- Player Telemetry Modal -->
@@ -731,8 +744,15 @@ HTML_PAGE = """
     const valLatestDaily = document.getElementById("valLatestDaily");
     const valClanHourly = document.getElementById("valClanHourly");
 
-    const lblFooterLeft = document.getElementById("lblFooterLeft");
-    const lblFooterRight = document.getElementById("lblFooterRight");
+    const syncUpdatedTexts = document.querySelectorAll(".sync-updated-text");
+    const syncNextTexts = document.querySelectorAll(".sync-next-text");
+    const btnRefreshMain = document.getElementById("btnRefreshMain");
+    
+    if (btnRefreshMain) {
+        btnRefreshMain.addEventListener("click", () => {
+            remainingTime = 0; // Force immediate sync when clicked
+        });
+    }
 
     const playerModal = document.getElementById("playerModal");
     const mPlayerName = document.getElementById("mPlayerName");
@@ -1110,7 +1130,7 @@ HTML_PAGE = """
         currentPlayers = data.players;
         applySortAndRender();
 
-        lblFooterLeft.textContent = `◷ Updated: ${data.timestamp}`;
+        syncUpdatedTexts.forEach(el => el.textContent = `◷ Updated: ${data.timestamp}`);
         lblStatus.textContent = "[ STANDBY ]";
         lblStatus.style.color = "var(--text-muted)";
 
@@ -1230,7 +1250,7 @@ HTML_PAGE = """
     
     async function syncAllClans() {
       try {
-        lblFooterLeft.textContent = `◷ Syncing all clans...`;
+        syncUpdatedTexts.forEach(el => el.textContent = `◷ Syncing all clans...`);
         lblStatus.textContent = "[ SYNCING ]";
         lblStatus.style.color = "var(--neon-cyan)";
         
@@ -1299,12 +1319,12 @@ HTML_PAGE = """
             });
         }
         
-        lblFooterLeft.textContent = `◷ Updated: ${data.timestamp}`;
+        syncUpdatedTexts.forEach(el => el.textContent = `◷ Updated: ${data.timestamp}`);
         lblStatus.textContent = "[ STANDBY ]";
         lblStatus.style.color = "var(--text-muted)";
       } catch (e) {
         console.error("Bulk sync error", e);
-        lblFooterLeft.textContent = `◷ Sync Failed`;
+        syncUpdatedTexts.forEach(el => el.textContent = `◷ Sync Failed`);
         lblStatus.textContent = "[ ERROR ]";
         lblStatus.style.color = "#ef4444";
       }
@@ -1325,7 +1345,7 @@ HTML_PAGE = """
         }
       }
       
-      lblFooterRight.textContent = `Next Poll: ${remainingTime}s`;
+      syncNextTexts.forEach(el => el.textContent = `Next Refresh: ${remainingTime}s`);
     }, 1000);
 
     // Initial load respects the URL hash if user refreshes
@@ -1344,7 +1364,7 @@ HTML_PAGE = """
 """
 
 def execute_clan_poll(clan_tag):
-    global current_day, clan_sliding_history, player_sliding_history, player_baselines, live_clan_stats, live_players_cache
+    global clan_current_day, clan_sliding_history, player_sliding_history, player_baselines, live_clan_stats, live_players_cache, clan_hourly_baselines, clan_current_hour
 
     with tracking_lock:
         if not clan_tag:
@@ -1370,9 +1390,14 @@ def execute_clan_poll(clan_tag):
         date_str = game_day.strftime("%Y-%m-%d")
         month_str = game_day.strftime("%Y-%m")
 
+        # Initialize the clan's current day if it's the first time polling
+        if clan_tag not in clan_current_day:
+            clan_current_day[clan_tag] = game_day
+
         final_daily_total = None
 
-        if game_day != current_day:
+        # Check for day reset PER CLAN
+        if game_day != clan_current_day[clan_tag]:
             # 1. Calculate the final 24H total right BEFORE resetting
             temp_total = 0
             for member in raw_clan_data.get("memberList", []):
@@ -1383,14 +1408,19 @@ def execute_clan_poll(clan_tag):
             
             final_daily_total = temp_total
 
-            # 2. Proceed with normal reset
-            current_day = game_day
-            player_baselines.clear()
-            # Clear old baselines from DB on a new day
+            # 2. Proceed with normal reset FOR THIS CLAN ONLY
+            clan_current_day[clan_tag] = game_day
+            
+            # Remove only this clan's baselines from memory
+            keys_to_remove = [k for k in player_baselines if k.startswith(f"{clan_tag}:")]
+            for k in keys_to_remove:
+                del player_baselines[k]
+                
+            # Clear old baselines from DB on a new day for THIS clan
             if DATABASE_URL:
                 with get_db_connection() as conn:
                     with conn.cursor() as cur:
-                        cur.execute("DELETE FROM player_baselines")
+                        cur.execute("DELETE FROM player_baselines WHERE player_key LIKE %s", (f"{clan_tag}:%",))
                     conn.commit()
 
         clan_name = raw_clan_data.get("name", "Unknown Clan")
@@ -1457,12 +1487,25 @@ def execute_clan_poll(clan_tag):
 
         parsed_members.sort(key=lambda m: m["donations"], reverse=True)
 
-        c_hist = clan_sliding_history[clan_tag]
-        c_hist.append((current_epoch, season_donations_total))
-        while c_hist and (current_epoch - c_hist[0][0]) > 3600:
-            c_hist.popleft()
+        current_hour_label = now.strftime("%I:00:00 %p")
+        
+        # Initialize the clan's hourly baseline if it's the first time polling
+        if clan_tag not in clan_current_hour:
+            clan_current_hour[clan_tag] = current_hour_label
+            clan_hourly_baselines[clan_tag] = season_donations_total
 
-        clan_hourly = max(0, season_donations_total - c_hist[0][1])
+        # Check if the hour has ticked over
+        if current_hour_label != clan_current_hour[clan_tag]:
+            # Save the final tally for the DB right before we reset it
+            db_hourly_insert = max(0, season_donations_total - clan_hourly_baselines[clan_tag])
+            
+            # Reset the baseline for the new hour
+            clan_hourly_baselines[clan_tag] = season_donations_total
+            clan_current_hour[clan_tag] = current_hour_label
+            clan_hourly = 0
+        else:
+            clan_hourly = max(0, season_donations_total - clan_hourly_baselines[clan_tag])
+            db_hourly_insert = clan_hourly
 
         live_clan_stats[clan_tag] = {
             "name": clan_name,
@@ -1491,8 +1534,6 @@ def execute_clan_poll(clan_tag):
                     """, (clan_tag,))
                     last_entry = cur.fetchone()
 
-                    current_hour_label = now.strftime("%I:00:00 %p")
-
                     if not last_entry or last_entry[1] != current_hour_label:
                         
                         # Use final_daily_total if it was captured this cycle, otherwise use the live total
@@ -1506,7 +1547,7 @@ def execute_clan_poll(clan_tag):
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """, (
                             clan_tag, date_str, month_str, season_donations_total,
-                            season_received_total, db_daily_insert, clan_hourly,
+                            season_received_total, db_daily_insert, db_hourly_insert,
                             member_count, current_hour_label, current_epoch
                         ))
                 conn.commit()
@@ -1524,7 +1565,7 @@ def execute_clan_poll(clan_tag):
         }
 
         return payload, None
-
+        
 def background_worker_loop():
     while True:
         try:
@@ -1774,4 +1815,4 @@ if __name__ == "__main__":
     print(f"  • Active Port:         {port}")
     print("=" * 60)
 
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False) 
